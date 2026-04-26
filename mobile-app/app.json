@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "Class Attendance",
+    "slug": "class-attendance",
+    "version": "1.2.0",
+    "orientation": "portrait",
+    "scheme": "classattendance",
+    "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#EEF2FF"
+    },
+    "ios": { "supportsTablet": true },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#FFFFFF"
+      },
+      "package": "com.rrsdce.classattendance",
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Class Attendance to access your photos so you can upload a profile picture."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Class Attendance to save Excel/PDF reports to your device.",
+          "savePhotosPermission": "Allow Class Attendance to save Excel/PDF reports to your device.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
+    ],
+    "extra": {
+      "apiUrl": "https://class-attendance-backend.onrender.com"
+    }
+  }
+}
