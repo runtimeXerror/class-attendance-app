@@ -1423,7 +1423,7 @@ def update_teacher_self(
     return teacher
 
 @app.get("/api/teacher/attendance/{subject_id}/dates")
-def get_marked_dates(subject_id: int, teacher=Depends(get_current_teacher), db: Session = Depends(get_db)):
+def get_marked_dates(subject_id: int, current=Depends(auth.require_role("teacher")), db: Session = Depends(get_db)):
     records = db.query(AttendanceRecord.class_date).filter(
         AttendanceRecord.subject_id == subject_id
     ).distinct().all()
