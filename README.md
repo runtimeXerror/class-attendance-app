@@ -8,7 +8,17 @@ Built by **Vishal Kumar** (Full Stack) + **Ayush Kumar** (Frontend + Testing) ·
 
 ## ✨ What's New in v1.2.0
 
-### Latest Patch (Finalization)
+### Finalization Patch (latest)
+- 📅 **Custom calendar with marked-attendance dots** — date pill in Mark screen opens an in-app calendar; every day with attendance shows a faded circle + dot
+- 🎯 **Clickable teacher dashboard** — tap *Classes Taken* / *Students* / *Safe* / *Warning* / *Critical* to drill into a filtered list. Avg stays plain.
+- 🚪 **Smart back button** — on root dashboard a confirm-toast prevents accidental "logout"; sub-screens (admin → students/teachers/subjects) keep normal back navigation
+- 🗑️ **All-Absent submit deletes the day** — wrongly-marked days disappear from the calendar AND from Excel/PDF exports
+- ⏱️ **IST timestamps** — Excel/PDF "Generated" footer now shows India time (was UTC)
+- 🪜 **60% threshold** — Warning is 60–75%, Critical is below 60% (was 50)
+- ⚡ **Login latency jugad** — multi-endpoint parallel warmup + 4-min in-app keep-alive ping keeps the Render dyno awake while the app is open
+- 🛢️ **Supabase Postgres support** — set `DATABASE_URL` on Render and the data survives redeploys (see `docs/09-supabase-setup.md`)
+
+### Earlier in v1.2.0
 - 🎬 **Right→Left slide animation** on every screen transition (native, smooth)
 - ⬇️ **Excel download actually works** — uses `expo-file-system` + `expo-sharing`, opens native share sheet
 - 🏷️ **Student subject cards** — `Semester • 5` / `Credit • 3.0` shown as rounded chip boxes (clean look)
@@ -93,6 +103,32 @@ Find your local IP with `ipconfig` / `ifconfig` → app auto-detects OR edit `mo
 | Student (CE) | `23101125004` | DOB `2005-03-22` |
 
 Full roster: **6 branches · 37 teachers · 269 students · 50 subjects · 2225 enrollments**
+
+---
+
+## 🛢️ Database — Supabase (recommended for production)
+
+Render's free plan has no persistent disk → sqlite is wiped on every
+restart. To keep data permanent, point the backend at a free Supabase
+Postgres database:
+
+1. Create a Supabase project → copy the **Transaction pooler** URL (port 6543).
+2. On Render → **Environment** → `DATABASE_URL` = the pooler URL.
+3. Save → Render redeploys → data survives every restart.
+
+Full step-by-step in **[`docs/09-supabase-setup.md`](docs/09-supabase-setup.md)**.
+
+## ⚡ Keep the backend warm (login speed)
+
+Render free dyno sleeps after 15 min idle (cold start = 30–50 s). The
+app already mitigates this from three angles:
+
+- **Multi-endpoint parallel warmup** on app launch + role-picker + login
+- **4-min in-app keep-alive** ping (`/healthz`) while the app is open
+- **Aggressive axios retries** with auto-warmup on each timeout
+
+For round-the-clock warmth (when no one has the app open), set up
+UptimeRobot (5-min HTTP ping) — see **[`docs/10-keep-backend-warm.md`](docs/10-keep-backend-warm.md)**.
 
 ---
 
@@ -276,6 +312,7 @@ class-attendance-app-v1.2/
 
 ### Public
 - `POST /api/login` · `GET /api/branches` · `GET /api/batches`
+- `GET /` · `GET /healthz` — DB-free liveness pings (used by app keep-alive)
 
 ### Super Admin
 - `GET /api/superadmin/stats`
@@ -289,11 +326,15 @@ class-attendance-app-v1.2/
 - Teacher creation returns auto-password + auto-emails (if SMTP set)
 
 ### Teacher
-- `GET /api/teacher/me` *(NEW in v1.2)*
+- `GET /api/teacher/me`
 - `GET /api/teacher/subjects` · `GET /api/teacher/subjects/{id}/students`
 - `POST /api/teacher/attendance/mark` · `POST /api/teacher/attendance/edit`
-- `GET /api/teacher/dashboard/{subject_id}` · `GET /api/teacher/export/{id}`
-- `PATCH /api/teacher/profile` (now supports `profile_image`)
+  *(All-Absent submission deletes that day's records — no row in Excel)*
+- `GET /api/teacher/attendance/{subject_id}` — records for one date
+- `GET /api/teacher/attendance/{subject_id}/dates` — every date with marks (calendar dots)
+- `GET /api/teacher/dashboard/{subject_id}` — stats + `all_dates` for the clickable dashboard
+- `GET /api/teacher/export/{id}` · `GET /api/teacher/export-pdf/{id}` (IST timestamps)
+- `PATCH /api/teacher/profile` (supports `profile_image`)
 
 ### Student
 - `GET /api/student/attendance` — list with `teacher_name`, `credits`, `classes_needed_for_75`

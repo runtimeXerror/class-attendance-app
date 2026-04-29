@@ -34,6 +34,14 @@ def root():
     return {"status": "ok", "message": "Class Attendance API v1.1 is running"}
 
 
+# Ultra-fast keep-alive endpoint — no DB, no auth, no body work.
+# Hit this from the mobile app every few minutes to stop Render's
+# free plan from sleeping the dyno (15 min idle -> 30-50s cold start).
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
 # ============ LOGIN ============
 @app.post("/api/login", response_model=schemas.TokenResponse)
 def login(req: schemas.LoginRequest, db: Session = Depends(get_db)):

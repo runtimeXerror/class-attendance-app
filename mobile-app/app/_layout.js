@@ -3,7 +3,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ThemeProvider, useTheme } from '../lib/ThemeContext';
 import AnimatedSplash from '../components/AnimatedSplash';
-import { warmupBackend } from '../lib/api';
+import { warmupBackend, startKeepAlive } from '../lib/api';
 
 function Layout() {
   const { theme } = useTheme();
@@ -30,14 +30,20 @@ export default function RootLayout() {
   // Wake the Render free-tier backend the instant the app launches so
   // the eventual login request hits a warm server (~1s) instead of a cold
   // one (30-50s). Fire-and-forget — failures are silent.
-  useEffect(() => { warmupBackend(); }, []);
+  // Then start a 4-min keep-alive so the dyno stays awake while the
+  // user is in the app — no UptimeRobot needed.
+  useEffect(() => {
+    warmupBackend();
+    const stop = startKeepAlive();
+    return stop;
+  }, []);
 
   return (
     <ThemeProvider>
       <Layout />
       {!splashDone && (
         <AnimatedSplash
-          minDuration={1800}
+          minDuration={700}
           onFinish={() => setSplashDone(true)}
         />
       )}

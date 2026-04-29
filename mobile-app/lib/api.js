@@ -31,11 +31,11 @@ console.log('[api] Using backend URL:', API_URL);  // Visible in Expo Metro logs
 
 export const api = axios.create({
   baseURL: API_URL,
-  timeout: 35000,   // 35 sec — most cold starts finish in <30s; tighter timeout means a retry kicks in faster on the rare slow boot
+  timeout: 12000,   // 12s — warm server responds in <1s; tight timeout means a fast retry on cold starts
 });
 
-// Retry interceptor — if a request times out (cold start), retry up to 2 more times.
-// Worst case: 35s + 1s + 35s + 1s + 35s = ~107s. Typical warm server: <1s.
+// Retry interceptor — first attempt is short (12s), retries widen to 25s
+// to absorb a cold start. Worst case: ~62s. Typical warm: <1s.
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -43,15 +43,17 @@ api.interceptors.response.use(
     if (!config) return Promise.reject(error);
     config.__retryCount = config.__retryCount || 0;
 
-    // Retry on timeout / network errors (no response) up to 2 more times
     const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout');
     const isNetwork = !error.response && error.message === 'Network Error';
 
     if ((isTimeout || isNetwork) && config.__retryCount < 2) {
       config.__retryCount += 1;
-      console.log(`[api] Retry ${config.__retryCount}/2 — backend may be waking up...`);
-      // Short wait — server is probably done booting by now thanks to warmupBackend()
-      await new Promise(r => setTimeout(r, 1000));
+      console.log(`[api] Retry ${config.__retryCount}/2 — waking backend...`);
+      // Fire a parallel warmup ping so the dyno wakes up quicker
+      warmupBackend(true);
+      // Widen the timeout for retries since the server is clearly cold
+      config.timeout = 25000;
+      await new Promise(r => setTimeout(r, 500));
       return api.request(config);
     }
     return Promise.reject(error);
@@ -113,21 +115,63 @@ export const clearAuth = async () => {
   ]);
 };
 
-// Fire-and-forget warm-up ping. Render free tier sleeps after 15 min idle —
-// the first request after wake takes 30-50s. By pinging "/" early (e.g. as
-// soon as the app launches or the user lands on the role-select screen),
-// the server is already awake by the time the user submits the login form,
-// so login feels instant instead of a 60-180s wait.
+// =============================================================
+// Backend warmup + keep-alive (Render free-tier "jugad")
+//
+// Render free tier sleeps the dyno after 15 min of idle. First
+// request after wake takes 30-50s. We attack this from 3 angles:
+//
+//   1. warmupBackend() — fired the moment the app launches and on
+//      every screen that leads to a backend hit (role picker,
+//      login). Sends multiple parallel pings in case one request
+//      hangs while the dyno is in the middle of waking up.
+//
+//   2. startKeepAlive() — a 4-minute interval pings /healthz while
+//      the app is open. As long as ANY user has the app open, the
+//      backend never sleeps.
+//
+//   3. The axios retry interceptor fires a fresh warmup on every
+//      timeout retry, so even an unlucky first call finishes fast.
+// =============================================================
+
 let _warming = null;
-export const warmupBackend = () => {
-  if (_warming) return _warming;   // de-dupe concurrent calls
-  _warming = fetch(`${API_URL}/`, { method: 'GET' })
+let _lastWarm = 0;
+
+export const warmupBackend = (force = false) => {
+  // Re-warm at most every 30s unless forced (e.g. axios retry)
+  const now = Date.now();
+  if (!force && _warming) return _warming;
+  if (!force && now - _lastWarm < 30000) return Promise.resolve();
+  _lastWarm = now;
+
+  // Fire two parallel pings to different endpoints. Race them — the
+  // first to land "wins", but both contribute to waking the dyno.
+  const ping = (path) =>
+    fetch(`${API_URL}${path}`, { method: 'GET' }).catch(() => null);
+
+  _warming = Promise.race([ping('/healthz'), ping('/')])
     .catch(() => {})
     .finally(() => {
-      // Allow another warmup after 2 minutes (in case server slept again)
-      setTimeout(() => { _warming = null; }, 120000);
+      setTimeout(() => { _warming = null; }, 30000);
     });
   return _warming;
+};
+
+// Start a recurring ping while the app is open. Returns a cleanup
+// function (call it on unmount, though for the root layout we never
+// unmount). Default: 4 min — comfortably under Render's 15 min idle.
+let _keepAliveTimer = null;
+export const startKeepAlive = (intervalMs = 4 * 60 * 1000) => {
+  if (_keepAliveTimer) return;   // singleton — one timer per app
+  _keepAliveTimer = setInterval(() => {
+    fetch(`${API_URL}/healthz`, { method: 'GET' }).catch(() => {});
+  }, intervalMs);
+  return () => {
+    if (_keepAliveTimer) {
+      clearInterval(_keepAliveTimer);
+      _keepAliveTimer = null;
+    }
+  };
 };
 
 // Timezone-safe date: Date → YYYY-MM-DD (in local timezone)

@@ -1,6 +1,6 @@
 # 📚 Module-wise Documentation
 
-Complete technical documentation for Class Attendance App v1.0.
+Complete technical documentation for Class Attendance App v1.2.0.
 
 ## Modules
 
@@ -9,17 +9,19 @@ Complete technical documentation for Class Attendance App v1.0.
 | 1 | Authentication & Role-Based Access | [01-authentication.md](./01-authentication.md) |
 | 2 | Super Admin Panel | [02-superadmin-module.md](./02-superadmin-module.md) |
 | 3 | Branch Admin Panel | [03-admin-module.md](./03-admin-module.md) |
-| 4 | Teacher Portal | [04-teacher-module.md](./04-teacher-module.md) |
+| 4 | Teacher Portal (calendar dots, clickable dashboard) | [04-teacher-module.md](./04-teacher-module.md) |
 | 5 | Student Portal | [05-student-module.md](./05-student-module.md) |
 | 6 | Database Schema | [06-database-schema.md](./06-database-schema.md) |
-| 7 | Attendance Management | [07-attendance-module.md](./07-attendance-module.md) |
-| 8 | Excel Export | [08-excel-export.md](./08-excel-export.md) |
+| 7 | Attendance Management (all-absent delete, calendar) | [07-attendance-module.md](./07-attendance-module.md) |
+| 8 | Excel / PDF Export (IST timestamps) | [08-excel-export.md](./08-excel-export.md) |
+| 9 | **Database Persistence — Supabase setup** | [09-supabase-setup.md](./09-supabase-setup.md) |
+| 10 | **Keep Backend Warm — login speed** | [10-keep-backend-warm.md](./10-keep-backend-warm.md) |
 
 ## Quick Reference
 
 ### Tech Stack
-- **Backend:** FastAPI, SQLAlchemy, SQLite, bcrypt, python-jose (JWT), openpyxl
-- **Mobile:** React Native, Expo Router, Axios, AsyncStorage, DateTimePicker
+- **Backend:** FastAPI, SQLAlchemy, **Supabase Postgres** (production) / SQLite (dev), bcrypt, python-jose (JWT), openpyxl, reportlab
+- **Mobile:** React Native (Expo SDK 54), Expo Router, Axios, AsyncStorage, custom in-app calendar component
 
 ### Roles
 1. **Super Admin** — Top level (Vishal)

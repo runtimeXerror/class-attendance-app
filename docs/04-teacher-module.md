@@ -1,105 +1,178 @@
 # Module 04 — Teacher Module
 
 ## Overview
-Teachers mark daily attendance for their assigned subjects and export Excel reports at semester end.
+Teachers mark daily attendance for their assigned subjects, view a
+clickable analytics dashboard, and export Excel/PDF reports at semester
+end.
 
-## Dashboard
+## Dashboard (subject list)
 
 ### Welcome Card
-Shows teacher name with branch code, e.g. "Welcome back, Prof. Shubham Kumar 👨‍🏫"
+Shows teacher name + branch code + profile image (tap to upload).
 
 ### Subject Cards
-Each assigned subject is displayed as a card with:
+Each assigned subject shows:
 - **Code Badge** (e.g. "CS501")
-- **Semester Badge** (e.g. "SEM 5")
-- Subject Name
-- Batch info (e.g. "Batch 2023-27")
-- Two action buttons:
-  - 📝 **Mark Attendance** — Opens marking screen
-  - 📊 **Export** — Download Excel
+- Semester / Batch / credits / session
+- Action row: **Mark · Dashboard · Excel · PDF**
 
-### API Endpoint
-- `GET /api/teacher/subjects` — Returns only subjects assigned to this teacher
+### API
+- `GET /api/teacher/subjects` — only subjects assigned to this teacher
+
+## Subject Dashboard (`/teacher/dashboard-subject`)
+
+Tapping **Dashboard** on any subject card opens the analytics dashboard.
+
+### Summary stats (row 1) — clickable
+| Card | What happens on tap |
+|---|---|
+| **Classes Taken** | Modal listing every class date — tap a date to view/edit that day's marks |
+| **Students** | Modal listing every enrolled student with their attendance % |
+| **Avg** | Plain number (not clickable) |
+
+### Status breakdown (row 2) — clickable
+Each pill opens a modal filtered to that group:
+
+| Pill | Threshold |
+|---|---|
+| ✓ Safe | percentage **≥ 75 %** |
+| ⚠ Warning | **60 % ≤ pct < 75 %** |
+| ✗ Critical | **pct < 60 %** |
+
+The same thresholds drive the per-row colour badge in the full student
+list below.
+
+### Recent Classes strip
+Last 10 dates as horizontal chips. Tap one to back-date edit that day.
+
+### API
+- `GET /api/teacher/dashboard/{subject_id}` — returns:
+  ```json
+  {
+    "subject": { ... },
+    "total_classes": 12,
+    "recent_dates": ["2026-04-29", ...],   // last 10
+    "all_dates":    ["2026-04-29", ...],   // every class date (used by the modal)
+    "students": [{ "student_id", "name", "percentage", ... }]
+  }
+  ```
 
 ## Mark Attendance Flow
 
-### Screen Layout
-1. **Subject bar** with title + date picker (timezone-safe)
-2. **Stats row** — Present / Absent / Total (color-coded)
-3. **"Mark All Present" button** — Quick-toggle for high attendance days
-4. **Student list** — tap to toggle P ↔ A
-5. **Submit button** — Save attendance
+### Screen header
+- Subject name (large)
+- Course code pill **left**
+- Today's date pill **right** — tap to open the **calendar picker**
 
-### Smart Features
-- **Auto-load existing data** — If attendance was already marked for this date, loads existing marks
-- **Default all present** — Most students are usually present, so this is the default
-- **Re-marking supported** — Teacher can re-mark a date, old records replaced
+### Calendar picker
+Custom in-app calendar (`components/AttendanceCalendar.js`).
 
-### Visual Feedback
-- Present row: Green background, green badge with "P"
-- Absent row: Red background, red badge with "A"
-- Tap anywhere on row to toggle
+- Month nav (←/→), weekday header, day grid.
+- **Days with attendance already marked** show a faded `primaryLight`
+  circle background **and a small dot** below the date number.
+- **Today** has a thin primary-colour border (when not selected).
+- **Selected day** is filled with the primary colour.
+- Future days are disabled.
+- Footer legend shows "Attendance marked (N)".
 
-### API Endpoints
-- `GET /api/teacher/subjects/{subject_id}/students` — List enrolled students
-- `GET /api/teacher/attendance/{subject_id}?class_date=YYYY-MM-DD` — Existing records
-- `POST /api/teacher/attendance/mark` — Submit batch marks
+The marked-dates list is fetched from
+`GET /api/teacher/attendance/{subject_id}/dates` on screen mount AND
+again after every successful submit, so dots reflect reality
+immediately.
 
-### Mark Request Body
+### Mark screen body
+1. Stats row — Present / Absent / Total (live count).
+2. **All Present / All Absent** large buttons (with confirm toast).
+3. Student list — tap any row to toggle P ↔ A.
+4. **Submit Attendance**.
+
+### Submit behaviour
+Endpoint:
+- `POST /api/teacher/attendance/mark` — for today's date
+- `POST /api/teacher/attendance/edit` — for back-date edits
+
+Both endpoints **first delete** any existing rows for the date, then
+re-insert. There is one important exception:
+
+> **All-Absent rule** — if every student is marked Absent, the server
+> deletes the day's rows and **inserts nothing**. The day disappears
+> from the calendar dots and from Excel/PDF exports. This is the
+> "undo a wrongly-marked day" gesture: select the date, hit *All
+> Absent*, submit.
+
+### Request body
 ```json
 {
   "subject_id": 1,
-  "class_date": "2026-04-18",
+  "class_date": "2026-04-29",
   "marks": [
     {"student_id": 1, "status": "P"},
-    {"student_id": 2, "status": "A"},
-    ...
+    {"student_id": 2, "status": "A"}
   ]
 }
 ```
 
-## Excel Export
+### Smart features
+- **Auto-load existing marks** for the picked date.
+- **Default all present** for fresh dates (most days everyone shows up).
+- **Re-marking** safe — old records replaced atomically.
+- **Past-date marking** allowed up to today; future dates disabled.
 
-### Endpoint
-`GET /api/teacher/export/{subject_id}`
+## Exports — Excel + PDF
 
-### Report Format
-- Title row with subject name + code
-- Columns: S.No, Reg No, Name, Section, [date columns], Present, Total, %
-- P cells: Green fill, A cells: Red fill
-- Auto-calculated totals per student
+| Endpoint | Output |
+|---|---|
+| `GET /api/teacher/export/{subject_id}` | Branded `.xlsx` |
+| `GET /api/teacher/export-pdf/{subject_id}` | Branded `.pdf` (A3 landscape) |
 
-### Use Case
-Teacher downloads Excel at semester end to submit to HOD / college ERP.
+Both files include:
+- Title bar (subject name + report)
+- Sub bar (semester, branch, batch, duration, total classes)
+- Grouped rows: Back-Year batches → Lateral Entry → Regular
+- Date columns with P/A colour fills
+- Per-student totals + COUNTIF formulas (Excel) / pre-computed (PDF)
+- **Footer with IST timestamp** — `Generated: DD MMM YYYY, HH:MM AM/PM`
+  reflects the moment the file was generated (server is UTC, footer
+  helper `now_ist()` adds +5:30).
 
-## Date Picker Fix
+## Date / Timezone notes
 
-**Important:** Both login and attendance marking use `toLocalDateString()` to avoid the Android DOB bug where UTC conversion gave off-by-one dates.
+- Dates passed between app and API use `YYYY-MM-DD` (`toLocalDateString`)
+  to avoid the Android UTC off-by-one bug.
+- Human-facing timestamps in Excel/PDF use IST via the `now_ist()`
+  helper in `backend/app/main.py`.
 
 ## Best Practices
-- Mark attendance **during class** or immediately after
-- Don't leave default "all present" without reviewing
-- Use "Mark All Present" only when genuinely everyone is present
-- Export Excel periodically (weekly/monthly) as backup
-- Remind students to verify their attendance via student app
+- Mark **during class** so dots appear in real time on the calendar.
+- Use *All Present* / *All Absent* for the obvious cases — saves taps.
+- Use the **calendar dots** to spot missing class days at a glance.
+- Use **dashboard pills** to drill into Critical students before
+  exam-eligibility cut-offs.
+- Periodic Excel exports as backup.
 
 ## Common Tasks
 
 ### First class of semester
-1. Login
-2. See assigned subjects in dashboard
-3. Open first subject → Mark Attendance
-4. Today's date auto-selected
-5. Review list, mark absentees
-6. Submit
+1. Login → subject → **Mark**.
+2. Today auto-selected, default all-present.
+3. Review, mark absentees, submit.
 
-### End of semester
-1. Open subject
-2. Tap "Export" → Excel downloads
-3. Submit to HOD
+### Mid-semester analytics
+1. Subject → **Dashboard**.
+2. Tap **Critical** pill → list of below-60 % students.
+3. Tap **Classes Taken** to verify class count.
 
 ### Editing past attendance
-1. Open subject → Mark Attendance
-2. Change date to past date using date picker
-3. Edit marks → Submit
-4. Old records replaced with new ones
+1. Subject → **Mark** → tap date pill → calendar.
+2. Pick the date (dot will be visible if it has marks).
+3. Existing marks pre-load; edit and submit.
+
+### Removing a wrongly-marked day
+1. Pick the date.
+2. Tap **All Absent** → Submit.
+3. Day's records deleted; calendar dot disappears; day no longer in Excel/PDF.
+
+### End of semester
+1. Subject card → **Excel** / **PDF**.
+2. Save to device or share.
+3. Footer shows IST time of download.
