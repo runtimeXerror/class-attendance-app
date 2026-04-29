@@ -7,8 +7,10 @@ import { Radius, Shadow } from '../../lib/theme';
 import Navbar from '../../components/Navbar';
 import VerifiedBadge from '../../components/VerifiedBadge';
 import ScreenFadeIn from '../../components/ScreenFadeIn';
+import useExitOnBack from '../../lib/useExitOnBack';
 
 export default function StudentDashboard() {
+  useExitOnBack();
   const { theme } = useTheme();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);

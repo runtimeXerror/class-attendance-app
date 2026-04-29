@@ -12,8 +12,10 @@ import ScreenFadeIn from '../../components/ScreenFadeIn';
 import { AnimatedButton, AnimatedCard } from '../../components/Animated';
 import VerifiedBadge from '../../components/VerifiedBadge';
 import SearchBar from '../../components/SearchBar';
+import useExitOnBack from '../../lib/useExitOnBack';
 
 export default function SuperAdminDashboard() {
+  useExitOnBack();
   const { theme } = useTheme();
   const [name, setName] = useState('');
   const [stats, setStats] = useState(null);

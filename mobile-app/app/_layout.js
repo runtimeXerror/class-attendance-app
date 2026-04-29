@@ -3,6 +3,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ThemeProvider, useTheme } from '../lib/ThemeContext';
 import AnimatedSplash from '../components/AnimatedSplash';
+import { warmupBackend } from '../lib/api';
 
 function Layout() {
   const { theme } = useTheme();
@@ -25,6 +26,11 @@ function Layout() {
 
 export default function RootLayout() {
   const [splashDone, setSplashDone] = useState(false);
+
+  // Wake the Render free-tier backend the instant the app launches so
+  // the eventual login request hits a warm server (~1s) instead of a cold
+  // one (30-50s). Fire-and-forget — failures are silent.
+  useEffect(() => { warmupBackend(); }, []);
 
   return (
     <ThemeProvider>

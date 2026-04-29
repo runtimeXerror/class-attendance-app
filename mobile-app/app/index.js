@@ -4,7 +4,7 @@ import {
   Animated, Easing, Modal, Pressable, Linking, Share,
 } from 'react-native';
 import { router } from 'expo-router';
-import { getAuth } from '../lib/api';
+import { getAuth, warmupBackend } from '../lib/api';
 import { useTheme } from '../lib/ThemeContext';
 import { Radius, Shadow } from '../lib/theme';
 import AppLogo from '../components/AppLogo';
@@ -40,6 +40,10 @@ export default function Home() {
         Animated.timing(float, { toValue: 0, duration: 2000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
       ])
     ).start();
+
+    // Wake the backend while the user picks a role — the cold-start
+    // overlaps with their interaction so login feels instant.
+    warmupBackend();
 
     // Auto redirect if already logged in (30-day token)
     (async () => {

@@ -6,6 +6,7 @@ import { router } from 'expo-router';
 import { api, getAuth, API_URL, downloadFile, saveToDevice, shareFile } from '../../lib/api';
 import { useTheme } from '../../lib/ThemeContext';
 import { Radius, Shadow } from '../../lib/theme';
+import useExitOnBack from '../../lib/useExitOnBack';
 import Navbar from '../../components/Navbar';
 import ScreenFadeIn from '../../components/ScreenFadeIn';
 import Icon from '../../components/Icon';
@@ -13,6 +14,7 @@ import ActionButton from '../../components/ActionButton';
 import { AnimatedButton, AnimatedCard } from '../../components/Animated';
 
 export default function TeacherDashboard() {
+  useExitOnBack();
   const { theme } = useTheme();
   const [subjects, setSubjects] = useState([]);
   const [name, setName] = useState('');

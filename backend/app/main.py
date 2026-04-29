@@ -2,12 +2,19 @@ from fastapi import FastAPI, Depends, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from typing import List, Optional
 from io import BytesIO
 
 from . import models, schemas, auth
 from .database import engine, get_db, Base
+
+# Render servers run in UTC. The school is in India, so all human-facing
+# timestamps (Excel/PDF "Generated" footer, edited-at, etc.) need IST.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist():
+    return datetime.now(IST)
 
 Base.metadata.create_all(bind=engine)
 
@@ -582,6 +589,15 @@ def mark_attendance(
         models.AttendanceRecord.class_date == data.class_date
     ).delete()
 
+    # If every student is marked Absent, treat the date as "no class held"
+    # — drop the records entirely so the day disappears from the calendar
+    # and Excel/PDF exports. Lets teachers undo a wrongly-marked day by
+    # selecting it, hitting "All Absent", and submitting.
+    has_present = any(m.get("status") == "P" for m in data.marks)
+    if not has_present:
+        db.commit()
+        return {"success": True, "count": 0, "deleted_day": True}
+
     for m in data.marks:
         rec = models.AttendanceRecord(
             student_id=m["student_id"],
@@ -819,7 +835,7 @@ def export_attendance(
     footer_row = current_row + 1
     ws.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=ncols)
     fc = ws.cell(row=footer_row, column=1,
-                 value=f"Generated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}  •  "
+                 value=f"Generated: {now_ist().strftime('%d %b %Y, %I:%M %p')}  •  "
                        f"Teacher: {teacher.name}  •  Class Attendance v1.2.0  •  RRSDCE Begusarai")
     fc.font = Font(size=9, italic=True, color="64748B")
     fc.fill = footer_fill
@@ -1012,7 +1028,7 @@ def export_attendance_pdf(
     footer_style = ParagraphStyle('f', parent=styles['Normal'], fontSize=8,
                                   textColor=colors.HexColor('#64748B'), alignment=1)
     elements.append(Paragraph(
-        f"Generated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}  &bull;  "
+        f"Generated: {now_ist().strftime('%d %b %Y, %I:%M %p')}  &bull;  "
         f"Teacher: {teacher.name}  &bull;  Class Attendance v1.2.0  &bull;  RRSDCE Begusarai",
         footer_style
     ))
@@ -1358,6 +1374,7 @@ def teacher_dashboard(
         },
         "total_classes": total_classes,
         "recent_dates": class_dates[:10],
+        "all_dates": class_dates,
         "students": students_stats,
     }
 
@@ -1383,6 +1400,17 @@ def edit_attendance(
         models.AttendanceRecord.subject_id == data.subject_id,
         models.AttendanceRecord.class_date == data.class_date
     ).delete()
+
+    # All-absent edit removes the day completely (same rule as /mark).
+    has_present = any(m.get("status") == "P" for m in data.marks)
+    if not has_present:
+        db.commit()
+        return {
+            "success": True,
+            "message": "Attendance for this date removed",
+            "date": str(data.class_date),
+            "deleted_day": True,
+        }
 
     # Re-insert with updated data
     for m in data.marks:
@@ -1423,9 +1451,19 @@ def update_teacher_self(
     return teacher
 
 @app.get("/api/teacher/attendance/{subject_id}/dates")
-def get_marked_dates(subject_id: int, current=Depends(auth.require_role("teacher")), db: Session = Depends(get_db)):
-    records = db.query(AttendanceRecord.class_date).filter(
-        AttendanceRecord.subject_id == subject_id
+def get_marked_dates(
+    subject_id: int,
+    current=Depends(auth.require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    teacher = current["user"]
+    subj = db.query(models.Subject).filter(
+        models.Subject.id == subject_id,
+        models.Subject.teacher_id == teacher.id,
+    ).first()
+    if not subj:
+        raise HTTPException(404, "Subject not assigned to you")
+    rows = db.query(models.AttendanceRecord.class_date).filter(
+        models.AttendanceRecord.subject_id == subject_id
     ).distinct().all()
-    dates = [str(r.class_date) for r in records]
-    return {"dates": dates}
+    return {"dates": [str(r[0]) for r in rows]}

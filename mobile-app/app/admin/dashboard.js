@@ -7,8 +7,10 @@ import { Radius, Shadow } from '../../lib/theme';
 import Navbar from '../../components/Navbar';
 import ScreenFadeIn from '../../components/ScreenFadeIn';
 import { AnimatedCard } from '../../components/Animated';
+import useExitOnBack from '../../lib/useExitOnBack';
 
 export default function AdminDashboard() {
+  useExitOnBack();
   const { theme } = useTheme();
   const [name, setName] = useState('');
   const [branchName, setBranchName] = useState('');

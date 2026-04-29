@@ -8,6 +8,7 @@ services:
     buildCommand: pip install -r requirements.txt
     # startup.py creates tables + seeds the DB on first start
     startCommand: python startup.py && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
     envVars:
       - key: SECRET_KEY
         generateValue: true
@@ -15,9 +16,10 @@ services:
         value: 3.11.9
       - key: ENV
         value: production
-      # NOTE: No DATABASE_URL set — falls back to local ./attendance.db
-      # WARNING: Free plan has NO persistent disk. Database resets on every restart/redeploy.
-      # When you upgrade to a paid plan, add:
-      #   - key: DATABASE_URL
-      #     value: sqlite:////var/data/attendance.db
-      # and re-add the `disk:` block below.
+      # Set this in the Render dashboard to your Supabase Postgres connection
+      # string (use the Transaction pooler URL — port 6543).
+      # Example: postgresql://postgres.<projectref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
+      # Without DATABASE_URL the app falls back to local sqlite, which is
+      # WIPED on every Render restart/redeploy on the free plan.
+      - key: DATABASE_URL
+        sync: false

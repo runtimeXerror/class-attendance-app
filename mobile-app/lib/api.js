@@ -31,11 +31,11 @@ console.log('[api] Using backend URL:', API_URL);  // Visible in Expo Metro logs
 
 export const api = axios.create({
   baseURL: API_URL,
-  timeout: 60000,   // 60 sec — Render free plan cold start takes 30-50 sec
+  timeout: 35000,   // 35 sec — most cold starts finish in <30s; tighter timeout means a retry kicks in faster on the rare slow boot
 });
 
 // Retry interceptor — if a request times out (cold start), retry up to 2 more times.
-// Total wait is ~3 min worst case which is enough for Render free wake-up.
+// Worst case: 35s + 1s + 35s + 1s + 35s = ~107s. Typical warm server: <1s.
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -50,8 +50,8 @@ api.interceptors.response.use(
     if ((isTimeout || isNetwork) && config.__retryCount < 2) {
       config.__retryCount += 1;
       console.log(`[api] Retry ${config.__retryCount}/2 — backend may be waking up...`);
-      // Wait a bit before retrying
-      await new Promise(r => setTimeout(r, 3000));
+      // Short wait — server is probably done booting by now thanks to warmupBackend()
+      await new Promise(r => setTimeout(r, 1000));
       return api.request(config);
     }
     return Promise.reject(error);
@@ -111,6 +111,23 @@ export const clearAuth = async () => {
     'token', 'role', 'name', 'user_id',
     'branch_name', 'branch_code', 'profile_image', 'must_change_password',
   ]);
+};
+
+// Fire-and-forget warm-up ping. Render free tier sleeps after 15 min idle —
+// the first request after wake takes 30-50s. By pinging "/" early (e.g. as
+// soon as the app launches or the user lands on the role-select screen),
+// the server is already awake by the time the user submits the login form,
+// so login feels instant instead of a 60-180s wait.
+let _warming = null;
+export const warmupBackend = () => {
+  if (_warming) return _warming;   // de-dupe concurrent calls
+  _warming = fetch(`${API_URL}/`, { method: 'GET' })
+    .catch(() => {})
+    .finally(() => {
+      // Allow another warmup after 2 minutes (in case server slept again)
+      setTimeout(() => { _warming = null; }, 120000);
+    });
+  return _warming;
 };
 
 // Timezone-safe date: Date → YYYY-MM-DD (in local timezone)

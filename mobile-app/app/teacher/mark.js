@@ -4,7 +4,6 @@ import {
   Modal, Pressable, Animated, ScrollView, Platform,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
-import DateTimePicker from '@react-native-community/datetimepicker';
 import { api, toLocalDateString } from '../../lib/api';
 import { useTheme } from '../../lib/ThemeContext';
 import { Radius, Shadow } from '../../lib/theme';
@@ -12,6 +11,7 @@ import Navbar from '../../components/Navbar';
 import Icon from '../../components/Icon';
 import { AnimatedButton } from '../../components/Animated';
 import VerifiedBadge from '../../components/VerifiedBadge';
+import AttendanceCalendar from '../../components/AttendanceCalendar';
 
 export default function MarkAttendance() {
   const { theme } = useTheme();
@@ -23,10 +23,18 @@ export default function MarkAttendance() {
   // Date is now stateful — user can pick any past date for back-date marking
   const [selectedDate, setSelectedDate] = useState(editDate ? new Date(editDate) : new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [markedDates, setMarkedDates] = useState([]);
   const isEditMode = !!editDate;
 
   // Keep "today" as alias for backward compat with rest of file
   const today = selectedDate;
+
+  const loadMarkedDates = async () => {
+    try {
+      const res = await api.get(`/api/teacher/attendance/${subjectId}/dates`);
+      setMarkedDates(res.data?.dates || []);
+    } catch (_) {}
+  };
 
   // Reload existing attendance whenever the picked date changes
   const loadForDate = async (date) => {
@@ -45,12 +53,9 @@ export default function MarkAttendance() {
     } catch (_) {}
   };
 
-  const onDateChange = (event, picked) => {
-    setShowDatePicker(false);
-    if (event?.type === 'set' && picked) {
-      setSelectedDate(picked);
-      loadForDate(picked);
-    }
+  const onDatePicked = (picked) => {
+    setSelectedDate(picked);
+    loadForDate(picked);
   };
 
   useEffect(() => {
@@ -69,6 +74,7 @@ export default function MarkAttendance() {
           existing.data.forEach(r => { map[r.student_id] = r.status; });
           setMarks(map);
         }
+        loadMarkedDates();
       } catch (e) {
         Alert.alert('Error', e.response?.data?.detail || e.message);
       }
@@ -116,6 +122,8 @@ export default function MarkAttendance() {
       });
       const p = marksList.filter(m => m.status === 'P').length;
       setSuccess({ present: p, absent: marksList.length - p, total: marksList.length });
+      // Refresh marked-dates so the calendar reflects the new entry instantly
+      loadMarkedDates();
     } catch (e) {
       Alert.alert('Error', e.response?.data?.detail || e.message);
     }
@@ -180,15 +188,14 @@ export default function MarkAttendance() {
           </View>
         </View>
 
-        {showDatePicker && (
-          <DateTimePicker
-            value={selectedDate}
-            mode="date"
-            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-            onChange={onDateChange}
-            maximumDate={new Date()}
-          />
-        )}
+        <AttendanceCalendar
+          visible={showDatePicker}
+          onClose={() => setShowDatePicker(false)}
+          selectedDate={selectedDate}
+          markedDates={markedDates}
+          onPick={onDatePicked}
+          maxDate={new Date()}
+        />
 
         {/* Stats row */}
         <View style={styles.statsRow}>

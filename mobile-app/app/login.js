@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { api, saveAuth, toLocalDateString } from '../lib/api';
+import { api, saveAuth, toLocalDateString, warmupBackend } from '../lib/api';
 import { useTheme } from '../lib/ThemeContext';
 import { Radius, Shadow } from '../lib/theme';
 import { AnimatedButton } from '../components/Animated';
@@ -36,6 +36,8 @@ export default function LoginPage() {
   const float = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    // One more nudge in case the user came straight to /login via a deep link.
+    warmupBackend();
     Animated.parallel([
       Animated.timing(fade, { toValue: 1, duration: 400, useNativeDriver: true }),
       Animated.timing(slide, { toValue: 0, duration: 500, easing: Easing.out(Easing.ease), useNativeDriver: true }),
