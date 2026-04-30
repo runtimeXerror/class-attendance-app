@@ -29,7 +29,7 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"status": "ok", "message": "Class Attendance API v1.1 is running"}
 
@@ -37,7 +37,9 @@ def root():
 # Ultra-fast keep-alive endpoint — no DB, no auth, no body work.
 # Hit this from the mobile app every few minutes to stop Render's
 # free plan from sleeping the dyno (15 min idle -> 30-50s cold start).
-@app.get("/healthz")
+# Accepts HEAD too — UptimeRobot's default HTTP(s) check uses HEAD,
+# without this it gets a 405 and reports the service as Down.
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 def healthz():
     return {"ok": True}
 
