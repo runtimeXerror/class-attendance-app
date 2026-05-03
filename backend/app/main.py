@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Response, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, Response, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -177,6 +177,7 @@ def list_branches(db: Session = Depends(get_db)):
 @app.post("/api/superadmin/admins", response_model=schemas.AdminCreateResponse)
 def create_admin_by_super(
     data: schemas.AdminCreate,
+    background_tasks: BackgroundTasks,
     current=Depends(auth.require_role("superadmin")),
     db: Session = Depends(get_db)
 ):
@@ -206,24 +207,33 @@ def create_admin_by_super(
 
     branch = db.query(models.Branch).filter(models.Branch.id == admin.branch_id).first()
 
-    # Send credentials email (no-op if SMTP not configured)
+    # Email send is queued as a background task so the API responds in
+    # ~50 ms even if Gmail SMTP takes 20+ s. The super-admin's screen never
+    # spins waiting on a network round-trip we don't control.
     from . import email_utils
-    email_sent = email_utils.send_credentials_email(admin.email, admin.name, "Branch HOD", default_pwd)
+    smtp_set = email_utils.is_configured()
+    if smtp_set:
+        background_tasks.add_task(
+            email_utils.send_credentials_email,
+            admin.email, admin.name, "Branch HOD", default_pwd,
+        )
 
     return {
         "id": admin.id,
         "email": admin.email,
         "name": admin.name,
         "branch_code": branch.code if branch else "",
-        # Hide password from the super-admin screen when it was emailed.
-        # If SMTP is unset we expose it so credentials don't get lost.
-        "default_password": "" if email_sent else default_pwd,
-        "email_sent": email_sent,
+        # If SMTP is configured we trust it'll go through (logs will show
+        # success/failure). Hide the password from the screen in that case.
+        # If SMTP isn't configured at all we surface the password so it can
+        # be shared manually.
+        "default_password": "" if smtp_set else default_pwd,
+        "email_sent": smtp_set,
         "message": (
-            f"HOD created. Credentials emailed to {admin.email}."
-            if email_sent
+            f"HOD created. Credentials emailing to {admin.email} (check inbox in ~10 s)."
+            if smtp_set
             else f"HOD created. Default password: {default_pwd}\n"
-                 f"⚠ SMTP is not configured — share this password manually with the HOD."
+                 f"⚠ SMTP is not configured — share this password manually."
         ),
     }
 
@@ -335,6 +345,7 @@ def _teacher_in_admin_branch(db: Session, teacher_id: int, branch_id: int):
 @app.post("/api/admin/teachers", response_model=schemas.TeacherCreateResponse)
 def create_teacher(
     data: schemas.TeacherCreate,
+    background_tasks: BackgroundTasks,
     current=Depends(auth.require_role("admin")),
     db: Session = Depends(get_db)
 ):
@@ -395,21 +406,29 @@ def create_teacher(
     db.add(models.TeacherBranch(teacher_id=teacher.id, branch_id=admin.branch_id))
     db.commit()
 
-    # First-time only — credentials email
+    # Email send goes to a background task — API responds in milliseconds
+    # even if Gmail SMTP takes 20+ s (or fails entirely). HOD ko UI
+    # blocking 40-second wait nahi milta.
     from . import email_utils
-    email_sent = email_utils.send_credentials_email(teacher.email, teacher.name, "Teacher", default_pwd)
+    smtp_set = email_utils.is_configured()
+    if smtp_set:
+        background_tasks.add_task(
+            email_utils.send_credentials_email,
+            teacher.email, teacher.name, "Teacher", default_pwd,
+        )
 
     return {
         "id": teacher.id,
         "email": teacher.email,
         "name": teacher.name,
-        # Don't echo the password back when it was emailed — keeps it
-        # off the HOD's screen / screenshots / clipboard.
-        "default_password": "" if email_sent else default_pwd,
-        "email_sent": email_sent,
+        # Hide password from HOD's screen when SMTP is configured (email
+        # will deliver). Surface it only when SMTP isn't set, so HOD has
+        # something to share manually.
+        "default_password": "" if smtp_set else default_pwd,
+        "email_sent": smtp_set,
         "message": (
-            f"Teacher created. Credentials emailed to {teacher.email}."
-            if email_sent
+            f"Teacher created. Credentials emailing to {teacher.email} (check inbox in ~10 s)."
+            if smtp_set
             else f"Teacher created. Default password: {default_pwd}\n"
                  f"⚠ SMTP is not configured — share this password manually."
         ),
