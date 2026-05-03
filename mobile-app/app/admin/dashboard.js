@@ -42,7 +42,7 @@ export default function AdminDashboard() {
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <Navbar subtitle={`${branchCode} Branch Admin`} />
+      <Navbar subtitle={`${branchCode} Branch HOD`} />
       <ScreenFadeIn direction="right" duration={380}>
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         <View style={[styles.hero, { backgroundColor: theme.primary }]}>

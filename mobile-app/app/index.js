@@ -13,7 +13,7 @@ import Typewriter from '../components/Typewriter';
 
 const roles = [
   { key: 'superadmin', label: 'Super Admin', icon: '👨‍💻', desc: 'Manage everything' },
-  { key: 'admin',      label: 'Admin',       icon: '👨‍💼', desc: 'Manage a branch' },
+  { key: 'admin',      label: 'HOD',         icon: '👨‍💼', desc: 'Manage your branch' },
   { key: 'teacher',    label: 'Teacher',     icon: '👨‍🏫', desc: 'Mark attendance' },
   { key: 'student',    label: 'Student',     icon: '🎓', desc: 'Track yours' },
 ];

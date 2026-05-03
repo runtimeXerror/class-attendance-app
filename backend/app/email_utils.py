@@ -38,21 +38,25 @@ def send_credentials_email(to_email: str, name: str, role: str, default_password
     from_addr = os.getenv("SMTP_FROM", user)
 
     subject = "Your Class Attendance Login Credentials"
-    body = f"""Hello {name},
+    body = f"""Hi {name},
 
-Welcome to Class Attendance App!
+Your account password at 'Class Attendance — RRSDCE Begusarai' as follows.
 
-Your {role} account has been created. Please use the following credentials to login:
+Your current login information is now:
+username: {to_email}
+password: {default_password}
 
-    Email:    {to_email}
-    Password: {default_password}
+Please open the Class Attendance app and login as {role}, then change your
+password from Settings on first login.
 
-⚠️ IMPORTANT: For security, please change your password on first login.
+In most mail programs, the credentials above can be selected and copied
+directly into the app. If you face any issue, share these details with
+your branch HOD only — never with anyone else.
 
----
-Class Attendance v1.2.0
-Developed by Vishal Kumar
-@ RRSDCE Begusarai
+Cheers from the 'Class Attendance' administrator,
+
+Admin, Class Attendance
+@ RRSDCE Begusarai • Developed by Vishal Kumar
 """
 
     msg = MIMEMultipart()

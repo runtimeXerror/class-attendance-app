@@ -20,7 +20,13 @@ export default function SuperAdminDashboard() {
   const [name, setName] = useState('');
   const [stats, setStats] = useState(null);
   const [activeView, setActiveView] = useState(null);  // 'branches', 'admins', etc.
-  const [viewData, setViewData] = useState([]);
+  // Per-section cache keeps lists instant when re-opening a card.
+  // load() pre-fetches all sections in parallel on mount, so by the time
+  // the user taps a card the data is already in memory.
+  const [cache, setCache] = useState({
+    branches: null, admins: null, teachers: null,
+    students: null, subjects: null, batches: null,
+  });
   const [searchText, setSearchText] = useState('');
   const [branches, setBranches] = useState([]);
   const [batches, setBatches] = useState([]);
@@ -39,6 +45,25 @@ export default function SuperAdminDashboard() {
   const [batchForm, setBatchForm] = useState({ start_year: '', end_year: '', current_semester: '1' });
   const [editingBatch, setEditingBatch] = useState(null);
 
+  // Pre-fetches every section in parallel and stuffs each into the cache.
+  // Errors on one section don't kill the others. Called on mount + after CRUD.
+  const refreshAll = async () => {
+    const safeGet = (url) => api.get(url).then(r => r.data).catch(() => null);
+    const [admins, teachers, students, subjects] = await Promise.all([
+      safeGet('/api/superadmin/admins'),
+      safeGet('/api/superadmin/all-teachers'),
+      safeGet('/api/superadmin/all-students'),
+      safeGet('/api/superadmin/all-subjects'),
+    ]);
+    setCache(prev => ({
+      ...prev,
+      admins:   admins   ?? prev.admins,
+      teachers: teachers ?? prev.teachers,
+      students: students ?? prev.students,
+      subjects: subjects ?? prev.subjects,
+    }));
+  };
+
   const load = async () => {
     const auth = await getAuth();
     if (auth.role !== 'superadmin') { router.replace('/'); return; }
@@ -52,30 +77,42 @@ export default function SuperAdminDashboard() {
       setStats(s.data);
       setBranches(b.data);
       setBatches(bt.data);
+      setCache(prev => ({ ...prev, branches: b.data, batches: bt.data }));
     } catch (e) {
       Alert.alert('Error', e.message);
     }
+    // Heavy listings — fired in parallel with dashboard browsing so card
+    // taps render instantly from the cache.
+    refreshAll();
   };
 
   useEffect(() => { load(); }, []);
 
-  const openView = async (key) => {
+  // Cached data renders instantly. A silent background refresh keeps the
+  // open card up-to-date without blocking the UI.
+  const openView = (key) => {
     setActiveView(key);
-    setViewData([]);
     setSearchText('');
-    try {
-      let data = [];
-      if (key === 'branches') data = branches;
-      else if (key === 'admins') data = (await api.get('/api/superadmin/admins')).data;
-      else if (key === 'teachers') data = (await api.get('/api/superadmin/all-teachers')).data;
-      else if (key === 'students') data = (await api.get('/api/superadmin/all-students')).data;
-      else if (key === 'subjects') data = (await api.get('/api/superadmin/all-subjects')).data;
-      else if (key === 'batches') data = batches;
-      setViewData(data);
-    } catch (e) {
-      Alert.alert('Error', e.response?.data?.detail || e.message);
+    if (key === 'branches' || key === 'batches') return;
+    const url = {
+      admins: '/api/superadmin/admins',
+      teachers: '/api/superadmin/all-teachers',
+      students: '/api/superadmin/all-students',
+      subjects: '/api/superadmin/all-subjects',
+    }[key];
+    if (url) {
+      api.get(url)
+        .then(r => setCache(prev => ({ ...prev, [key]: r.data })))
+        .catch(() => {});
     }
   };
+
+  const viewData = useMemo(() => {
+    if (!activeView) return [];
+    if (activeView === 'branches') return branches;
+    if (activeView === 'batches') return batches;
+    return cache[activeView] || [];
+  }, [activeView, cache, branches, batches]);
 
   const filteredData = useMemo(() => {
     if (!searchText.trim()) return viewData;
@@ -102,8 +139,8 @@ export default function SuperAdminDashboard() {
       load();
       openView('admins');
       Alert.alert(
-        '✓ Admin Created',
-        `${res.data.message}\n\nEmail: ${res.data.email}\nDefault password: ${res.data.default_password}\n\n(Admin will be forced to change on first login)`
+        '✓ HOD Created',
+        `${res.data.message}\n\nEmail: ${res.data.email}\nDefault password: ${res.data.default_password}\n\n(HOD will be forced to change on first login)`
       );
     } catch (e) {
       Alert.alert('Error', e.response?.data?.detail || e.message);
@@ -111,7 +148,7 @@ export default function SuperAdminDashboard() {
   };
 
   const deleteAdmin = (a) => {
-    Alert.alert('Delete Admin', `Delete ${a.name}?`, [
+    Alert.alert('Delete HOD', `Delete ${a.name}?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete', style: 'destructive',
@@ -119,7 +156,6 @@ export default function SuperAdminDashboard() {
           try {
             await api.delete(`/api/superadmin/admins/${a.id}`);
             load();
-            openView('admins');
           } catch (e) {
             Alert.alert('Error', e.response?.data?.detail || e.message);
           }
@@ -159,7 +195,6 @@ export default function SuperAdminDashboard() {
           try {
             await api.delete(`/api/superadmin/branches/${b.id}`);
             load();
-            openView('branches');
           } catch (e) {
             Alert.alert('Error', e.response?.data?.detail || e.message);
           }
@@ -204,7 +239,6 @@ export default function SuperAdminDashboard() {
           try {
             await api.delete(`/api/superadmin/batches/${b.id}`);
             load();
-            openView('batches');
           } catch (e) {
             Alert.alert('Error', e.response?.data?.detail || e.message);
           }
@@ -216,7 +250,7 @@ export default function SuperAdminDashboard() {
   // ===== CARDS (3 rows × 2 cols = 6 cards) =====
   const cards = [
     { key: 'branches', label: 'Branches', icon: '🏫', count: stats?.total_branches || 0, color: theme.info },
-    { key: 'admins',   label: 'Admins',   icon: '👨‍💼', count: stats?.total_admins || 0,   color: theme.primary },
+    { key: 'admins',   label: 'HODs',     icon: '👨‍💼', count: stats?.total_admins || 0,   color: theme.primary },
     { key: 'teachers', label: 'Teachers', icon: '👨‍🏫', count: stats?.total_teachers || 0, color: theme.success },
     { key: 'students', label: 'Students', icon: '🎓', count: stats?.total_students || 0, color: theme.warning },
     { key: 'subjects', label: 'Subjects', icon: '📚', count: stats?.total_subjects || 0, color: theme.accent },
@@ -265,14 +299,14 @@ export default function SuperAdminDashboard() {
       {/* ===== DRILL-DOWN MODAL ===== */}
       <Modal visible={!!activeView} animationType="slide" onRequestClose={() => setActiveView(null)}>
         <View style={{ flex: 1, backgroundColor: theme.bg }}>
-          <Navbar subtitle={activeView ? activeView.charAt(0).toUpperCase() + activeView.slice(1) : ''} />
+          <Navbar subtitle={viewLabel(activeView)} />
           <View style={{ flex: 1, padding: 14 }}>
             <View style={styles.drillHeader}>
               <TouchableOpacity onPress={() => setActiveView(null)} style={styles.drillBackBtn} activeOpacity={0.6}>
                 <Text style={{ color: theme.primary, fontWeight: '700', fontSize: 14 }}>← Back</Text>
               </TouchableOpacity>
               <Text style={[styles.drillTitle, { color: theme.text }]} numberOfLines={1}>
-                {activeView && activeView.charAt(0).toUpperCase() + activeView.slice(1)}
+                {viewLabel(activeView)}
               </Text>
               <View style={styles.drillAddSlot}>
                 {(activeView === 'admins' || activeView === 'branches' || activeView === 'batches') ? (
@@ -305,7 +339,15 @@ export default function SuperAdminDashboard() {
                 editBranch: (b) => { setEditingBranch(b); setBranchForm({ name: b.name, code: b.code }); setBranchModal(true); },
                 editBatch: (b) => { setEditingBatch(b); setBatchForm({ start_year: String(b.start_year), end_year: String(b.end_year), current_semester: String(b.current_semester) }); setBatchModal(true); },
               })}
-              ListEmptyComponent={<Text style={{ color: theme.textMuted, textAlign: 'center', padding: 40 }}>No items</Text>}
+              ListEmptyComponent={
+                <Text style={{ color: theme.textMuted, textAlign: 'center', padding: 40 }}>
+                  {/* Distinguish "still fetching" from "really empty" so the user
+                      doesn't see a misleading empty state during cold start. */}
+                  {(activeView && activeView !== 'branches' && activeView !== 'batches' && cache[activeView] === null)
+                    ? 'Loading…'
+                    : 'No items'}
+                </Text>
+              }
             />
           </View>
         </View>
@@ -314,9 +356,9 @@ export default function SuperAdminDashboard() {
       {/* ===== ADD ADMIN MODAL ===== */}
       <Modal visible={adminModal} animationType="slide" onRequestClose={() => setAdminModal(false)}>
         <ScrollView style={{ flex: 1, backgroundColor: theme.bg }} contentContainerStyle={{ padding: 20, paddingTop: 60 }}>
-          <Text style={[styles.modalTitle, { color: theme.text }]}>Add Branch Admin</Text>
+          <Text style={[styles.modalTitle, { color: theme.text }]}>Add Branch HOD</Text>
           <Text style={[styles.modalSub, { color: theme.textMuted }]}>
-            A default password will be auto-generated & emailed. Admin will change it on first login.
+            A default password will be auto-generated & emailed. HOD will change it on first login.
           </Text>
 
           <Lbl theme={theme}>Full Name *</Lbl>
@@ -413,6 +455,13 @@ export default function SuperAdminDashboard() {
   );
 }
 
+// Section keys map to internal route names but display nicer labels.
+function viewLabel(key) {
+  if (!key) return '';
+  if (key === 'admins') return 'HODs';
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
 // === render row per type ===
 function renderItem(item, type, theme, actions) {
   const base = {
@@ -465,12 +514,19 @@ function renderItem(item, type, theme, actions) {
   }
 
   if (type === 'teachers') {
+    // Show every branch the teacher is linked to. Cross-branch teachers
+    // (e.g. CSE + CSE-DS) get one badge per branch instead of just the primary.
+    const codes = (item.branch_codes && item.branch_codes.length)
+      ? item.branch_codes
+      : (item.branch_code ? [item.branch_code] : []);
     return (
       <View style={base}>
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <View style={{ backgroundColor: theme.success, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, marginRight: 8 }}>
-            <Text style={{ color: '#fff', fontSize: 10, fontWeight: '800' }}>{item.branch_code}</Text>
-          </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+          {codes.map(c => (
+            <View key={c} style={{ backgroundColor: theme.success, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, marginRight: 6, marginBottom: 4 }}>
+              <Text style={{ color: '#fff', fontSize: 10, fontWeight: '800' }}>{c}</Text>
+            </View>
+          ))}
           <Text style={{ color: theme.text, fontWeight: '700', fontSize: 14, flex: 1 }}>{item.name}</Text>
           {item.is_verified && <VerifiedBadge size={12} />}
         </View>

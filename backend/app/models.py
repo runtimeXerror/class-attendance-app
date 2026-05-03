@@ -41,6 +41,8 @@ class Teacher(Base):
     password_hash = Column(String, nullable=False)
     name = Column(String, nullable=False)
     phone = Column(String)
+    # branch_id = "primary"/"home" branch (the one the teacher was first added to).
+    # Cross-branch teaching is tracked via the TeacherBranch many-to-many table.
     branch_id = Column(Integer, ForeignKey("branches.id"))
     created_by_admin_id = Column(Integer, ForeignKey("admins.id"))
     is_active = Column(Boolean, default=True)
@@ -49,6 +51,17 @@ class Teacher(Base):
     profile_image = Column(String, nullable=True)     # filename/URL
     created_at = Column(DateTime, default=datetime.utcnow)
     branch = relationship("Branch")
+
+
+class TeacherBranch(Base):
+    """Many-to-many link: same teacher can teach in multiple branches.
+    Created automatically when a HOD adds an existing teacher (by email)
+    to their own branch — no duplicate user, no second credentials email."""
+    __tablename__ = "teacher_branches"
+    id = Column(Integer, primary_key=True, index=True)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=False)
+    branch_id = Column(Integer, ForeignKey("branches.id"), nullable=False)
+    __table_args__ = (UniqueConstraint("teacher_id", "branch_id"),)
 
 
 class Batch(Base):

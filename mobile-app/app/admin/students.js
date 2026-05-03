@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, TextInput, Alert, Modal, ScrollView, Platform } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { api, toLocalDateString } from '../../lib/api';
+import * as DocumentPicker from 'expo-document-picker';
+import { api, API_URL, toLocalDateString } from '../../lib/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../../lib/ThemeContext';
 import { Radius, Shadow } from '../../lib/theme';
 import Navbar from '../../components/Navbar';
@@ -23,6 +25,14 @@ export default function Students() {
   });
   const [dob, setDob] = useState(new Date(2005, 0, 1));
   const [showPicker, setShowPicker] = useState(false);
+
+  // ---- Bulk import state ----
+  // HOD picks a CSV or XLSX file (Google Form responses → Sheets →
+  // Download as CSV/XLSX). The picked file is sent to the backend
+  // as multipart/form-data and parsed there with openpyxl/csv.
+  const [importModal, setImportModal] = useState(false);
+  const [pickedFile, setPickedFile] = useState(null);
+  const [importing, setImporting] = useState(false);
 
   const fetchStudents = async () => {
     setLoading(true);
@@ -58,6 +68,93 @@ export default function Students() {
       setDob(new Date(+y, +m - 1, +d));
     }
     setModal(true);
+  };
+
+  // Open the system file picker. Accepts CSV / XLSX / XLS / TSV / TXT
+  // — covers Google Forms → Sheets → Download exports, plain Excel files,
+  // and tab-separated copy-paste files.
+  const pickFile = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: [
+          'text/csv',
+          'text/comma-separated-values',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/vnd.ms-excel',
+          'text/tab-separated-values',
+          'text/plain',
+          '*/*',  // Android sometimes mis-reports CSV mime, so allow all
+        ],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (res.canceled) return;
+      const f = res.assets?.[0];
+      if (!f) return;
+      // Reject files we can't reasonably parse (e.g. .pdf, .docx)
+      const lower = (f.name || '').toLowerCase();
+      const okExt = ['.csv', '.xlsx', '.xls', '.tsv', '.txt'].some(e => lower.endsWith(e));
+      if (!okExt) {
+        Alert.alert('Unsupported file', `Pick a .csv, .xlsx, .xls, .tsv, or .txt file.\nYou picked: ${f.name}`);
+        return;
+      }
+      setPickedFile(f);
+    } catch (e) {
+      Alert.alert('Pick failed', e.message || 'Could not open file picker');
+    }
+  };
+
+  const submitImport = async () => {
+    if (!pickedFile) {
+      Alert.alert('Pick a file first', 'Tap "Choose File" to select your CSV or Excel.');
+      return;
+    }
+    setImporting(true);
+    try {
+      const lower = (pickedFile.name || '').toLowerCase();
+      const mime =
+        lower.endsWith('.xlsx') ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : lower.endsWith('.xls') ? 'application/vnd.ms-excel'
+        : lower.endsWith('.tsv') ? 'text/tab-separated-values'
+        : 'text/csv';
+
+      const fd = new FormData();
+      fd.append('batch_id', String(parseInt(batchId)));
+      fd.append('current_semester', String(parseInt(semester || '1')));
+      // React Native's FormData wants this {uri,name,type} shape, not a Blob.
+      fd.append('file', {
+        uri: pickedFile.uri,
+        name: pickedFile.name,
+        type: mime,
+      });
+
+      // We can't use the axios `api` instance here because RN axios
+      // sometimes mis-sets the Content-Type boundary; fetch is the
+      // reliable way to send multipart from an Expo app.
+      const token = await AsyncStorage.getItem('token');
+      const r = await fetch(`${API_URL}/api/admin/students/bulk-upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data.detail || `Upload failed (${r.status})`);
+      }
+      const warns = (data.parse_warnings || data.errors || []).length;
+      Alert.alert(
+        'Import Complete',
+        `✓ Added: ${data.added}\n` +
+        `↩ Skipped (already exists): ${data.skipped_existing}\n` +
+        (warns ? `⚠ Skipped (bad rows): ${warns}` : '')
+      );
+      setImportModal(false);
+      setPickedFile(null);
+      fetchStudents();
+    } catch (e) {
+      Alert.alert('Import failed', e.message || 'Server error');
+    }
+    setImporting(false);
   };
 
   const saveStudent = async () => {
@@ -146,13 +243,22 @@ export default function Students() {
           <Text style={[styles.count, { color: theme.textSecondary }]}>
             {students.length} students
           </Text>
-          <TouchableOpacity
-            style={[styles.addBtn, { backgroundColor: theme.primary }]}
-            onPress={openAdd}
-            activeOpacity={0.7}
-          >
-            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>+ Add</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TouchableOpacity
+              style={[styles.addBtn, { backgroundColor: theme.success }]}
+              onPress={() => { setPickedFile(null); setImportModal(true); }}
+              activeOpacity={0.7}
+            >
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>📥 Import</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.addBtn, { backgroundColor: theme.primary }]}
+              onPress={openAdd}
+              activeOpacity={0.7}
+            >
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>+ Add</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         <FlatList
@@ -262,6 +368,66 @@ export default function Students() {
             {editing ? 'Update' : 'Save'}
           </AnimatedButton>
           <TouchableOpacity onPress={() => setModal(false)} style={{ padding: 14, alignItems: 'center' }}>
+            <Text style={{ color: theme.textMuted }}>Cancel</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </Modal>
+
+      {/* ===== BULK IMPORT MODAL =====
+          HOD picks a CSV / XLSX file from device storage. Backend parses it. */}
+      <Modal visible={importModal} animationType="slide" onRequestClose={() => setImportModal(false)}>
+        <ScrollView style={{ flex: 1, backgroundColor: theme.bg }} contentContainerStyle={{ padding: 20, paddingTop: 60 }}>
+          <Text style={[styles.modalTitle, { color: theme.text }]}>Bulk Import Students</Text>
+          <Text style={{ color: theme.textMuted, fontSize: 12, marginBottom: 14, lineHeight: 18 }}>
+            Pick the CSV / Excel file you exported from your Google Form responses sheet.{'\n'}
+            Required columns: <Text style={{ fontWeight: '700', color: theme.text }}>reg_no, name, dob</Text>{'\n'}
+            Optional: type (regular / lateral / back), phone, semester{'\n'}
+            Existing reg_nos are skipped automatically — re-running is safe.
+          </Text>
+
+          <View style={[styles.hint, { backgroundColor: theme.warningLight, marginBottom: 12 }]}>
+            <Text style={{ color: theme.text, fontSize: 11, fontWeight: '600', textAlign: 'left' }}>
+              💡 In your Google Sheet:{'\n'}
+              File → Download → Comma Separated Values (.csv){'\n'}
+              Or Microsoft Excel (.xlsx) — both work.
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            onPress={pickFile}
+            activeOpacity={0.7}
+            style={{
+              borderWidth: 2, borderStyle: 'dashed',
+              borderColor: pickedFile ? theme.success : theme.primary,
+              borderRadius: Radius.md,
+              padding: 24, alignItems: 'center',
+              backgroundColor: theme.card,
+            }}
+          >
+            <Text style={{ fontSize: 30, marginBottom: 8 }}>{pickedFile ? '✅' : '📁'}</Text>
+            <Text style={{ color: theme.text, fontSize: 14, fontWeight: '700' }}>
+              {pickedFile ? pickedFile.name : 'Choose File'}
+            </Text>
+            <Text style={{ color: theme.textMuted, fontSize: 11, marginTop: 6, textAlign: 'center' }}>
+              {pickedFile
+                ? `${(pickedFile.size / 1024).toFixed(1)} KB · tap to change`
+                : '.csv, .xlsx, .xls, .tsv supported'}
+            </Text>
+          </TouchableOpacity>
+
+          <Text style={{ color: theme.textMuted, fontSize: 11, marginTop: 12 }}>
+            Will import to {batchName} • Sem {semester}
+          </Text>
+
+          <AnimatedButton
+            onPress={submitImport}
+            color={theme.primary}
+            style={{ marginTop: 20 }}
+            disabled={importing || !pickedFile}
+          >
+            {importing ? 'Importing…' : 'Upload & Import'}
+          </AnimatedButton>
+          <TouchableOpacity onPress={() => { setImportModal(false); setPickedFile(null); }} style={{ padding: 14, alignItems: 'center' }}>
             <Text style={{ color: theme.textMuted }}>Cancel</Text>
           </TouchableOpacity>
         </ScrollView>

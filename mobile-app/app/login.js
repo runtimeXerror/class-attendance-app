@@ -13,7 +13,7 @@ import AppLogo from '../components/AppLogo';
 
 const roleInfo = {
   superadmin: { label: 'Super Admin', icon: '👨‍💻', desc: 'System administration access' },
-  admin:      { label: 'Admin',       icon: '👨‍💼', desc: 'Branch admin access' },
+  admin:      { label: 'HOD',         icon: '👨‍💼', desc: 'Branch HOD access' },
   teacher:    { label: 'Teacher',     icon: '👨‍🏫', desc: 'Faculty access' },
   student:    { label: 'Student',     icon: '🎓',   desc: 'Student access' },
 };

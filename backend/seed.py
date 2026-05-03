@@ -90,12 +90,12 @@ print(f"✓ Created {len(batches)} batches")
 # =========================
 admins = {}
 admin_info = [
-    ("CSE",    "cse.admin@rrsdce.edu",    "Ramesh Kumar (CSE Lab Assistant)",    "9876543210"),
-    ("CSE-DS", "csds.admin@rrsdce.edu",   "Ritesh Kumar (CSE-DS Lab Assistant)", "9876543220"),
-    ("CE",     "ce.admin@rrsdce.edu",     "Manoj Kumar (CE Lab Assistant)",      "9876543230"),
-    ("CHE",    "che.admin@rrsdce.edu",    "Rajesh Kumar (CHE Lab Assistant)",    "9876543240"),
-    ("EEE",    "eee.admin@rrsdce.edu",    "Dinesh Kumar (EEE Lab Assistant)",    "9876543250"),
-    ("ME",     "me.admin@rrsdce.edu",     "Sanjay Kumar (ME Lab Assistant)",     "9876543260"),
+    ("CSE",    "cse.admin@rrsdce.edu",    "Ramesh Kumar (CSE HOD)",    "9876543210"),
+    ("CSE-DS", "csds.admin@rrsdce.edu",   "Ritesh Kumar (CSE-DS HOD)", "9876543220"),
+    ("CE",     "ce.admin@rrsdce.edu",     "Manoj Kumar (CE HOD)",      "9876543230"),
+    ("CHE",    "che.admin@rrsdce.edu",    "Rajesh Kumar (CHE HOD)",    "9876543240"),
+    ("EEE",    "eee.admin@rrsdce.edu",    "Dinesh Kumar (EEE HOD)",    "9876543250"),
+    ("ME",     "me.admin@rrsdce.edu",     "Sanjay Kumar (ME HOD)",     "9876543260"),
 ]
 for code, email, name, phone in admin_info:
     a = models.Admin(
@@ -111,7 +111,7 @@ for code, email, name, phone in admin_info:
 db.commit()
 for a in admins.values():
     db.refresh(a)
-print(f"✓ Created {len(admins)} branch admins")
+print(f"✓ Created {len(admins)} branch HODs")
 
 # =========================
 # 5. TEACHERS (from actual PDFs/time-tables)
@@ -690,7 +690,7 @@ print("=" * 60)
 print("\n🔐 LOGIN CREDENTIALS\n")
 print("SUPER ADMIN:")
 print("  vishal@rrsdce.edu / vishal123")
-print("\nBRANCH ADMINS (all use password: admin123)")
+print("\nBRANCH HODs (all use password: admin123)")
 for code, email, name, _ in admin_info:
     print(f"  [{code:7}] {email}")
 print("\nTEACHERS (all use password: teacher123) — sample:")

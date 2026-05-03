@@ -59,13 +59,24 @@ export default function Teachers() {
       const res = await api.post('/api/admin/teachers', form);
       setModal(false);
       fetchTeachers();
-      Alert.alert(
-        '✓ Teacher Created',
-        `Email: ${res.data.email}\n` +
-        `Default Password: ${res.data.default_password}\n\n` +
-        `Share these credentials via email.\n` +
-        `Teacher must change password on first login.`
-      );
+      // Two outcomes:
+      //   • Brand-new teacher: backend returns a default_password and emailed it.
+      //   • Existing teacher (different branch): no new password — they reuse
+      //     their existing login. Backend's `message` explains either case.
+      if (res.data.default_password) {
+        Alert.alert(
+          '✓ Teacher Created',
+          `Email: ${res.data.email}\n` +
+          `Default Password: ${res.data.default_password}\n\n` +
+          `Credentials emailed (or share manually if SMTP isn't set).\n` +
+          `Teacher must change password on first login.`
+        );
+      } else {
+        Alert.alert(
+          '✓ Linked to Your Branch',
+          res.data.message || `${res.data.name} already had an account from another branch — no new email sent. They use the same login.`
+        );
+      }
     } catch (e) {
       Alert.alert('Error', e.response?.data?.detail || e.message);
     }

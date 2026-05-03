@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException, Response
+from fastapi import FastAPI, Depends, HTTPException, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import date, datetime, timezone, timedelta
@@ -18,7 +19,39 @@ def now_ist():
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Class Attendance System API v1.1")
+
+# ------------------------------------------------------------------
+# Lightweight startup migration: backfill teacher_branches so that
+# every existing teacher is linked to their primary branch_id.
+# Postgres `create_all` adds the new table, but pre-existing rows
+# need this one-time backfill to be visible in HOD listings.
+# ------------------------------------------------------------------
+def _ensure_teacher_branch_backfill():
+    from .database import SessionLocal
+    db = SessionLocal()
+    try:
+        rows = db.query(models.Teacher).all()
+        existing = {
+            (tb.teacher_id, tb.branch_id)
+            for tb in db.query(models.TeacherBranch).all()
+        }
+        created = 0
+        for t in rows:
+            if t.branch_id and (t.id, t.branch_id) not in existing:
+                db.add(models.TeacherBranch(teacher_id=t.id, branch_id=t.branch_id))
+                created += 1
+        if created:
+            db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+_ensure_teacher_branch_backfill()
+
+
+app = FastAPI(title="Class Attendance System API v1.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -193,8 +226,16 @@ def create_admin_by_super(
 
 @app.get("/api/superadmin/admins", response_model=List[schemas.AdminOut])
 def list_all_admins(current=Depends(auth.require_role("superadmin")), db: Session = Depends(get_db)):
+    branch_map = {b.id: b for b in db.query(models.Branch).all()}
     admins = db.query(models.Admin).order_by(models.Admin.branch_id).all()
-    return [_enrich_admin(a, db) for a in admins]
+    out = []
+    for a in admins:
+        d = schemas.AdminOut.from_orm(a)
+        b = branch_map.get(a.branch_id)
+        d.branch_name = b.name if b else None
+        d.branch_code = b.code if b else None
+        out.append(d)
+    return out
 
 
 @app.patch("/api/superadmin/admins/{admin_id}", response_model=schemas.AdminOut)
@@ -269,13 +310,62 @@ def super_stats(current=Depends(auth.require_role("superadmin")), db: Session = 
 
 
 # ============ ADMIN ============
+def _teacher_in_admin_branch(db: Session, teacher_id: int, branch_id: int):
+    """Helper: returns the Teacher if linked to this branch (via TeacherBranch
+    or as primary branch_id), else None. Used by HOD endpoints so any HOD can
+    edit/unlink a teacher that teaches in their branch — even one whose primary
+    branch is elsewhere."""
+    link = db.query(models.TeacherBranch).filter(
+        models.TeacherBranch.teacher_id == teacher_id,
+        models.TeacherBranch.branch_id == branch_id,
+    ).first()
+    if link:
+        return db.query(models.Teacher).filter(models.Teacher.id == teacher_id).first()
+    # Fallback for legacy rows (pre-migration) where TeacherBranch may be empty.
+    return db.query(models.Teacher).filter(
+        models.Teacher.id == teacher_id,
+        models.Teacher.branch_id == branch_id,
+    ).first()
+
+
 @app.post("/api/admin/teachers", response_model=schemas.TeacherCreateResponse)
 def create_teacher(
     data: schemas.TeacherCreate,
     current=Depends(auth.require_role("admin")),
     db: Session = Depends(get_db)
 ):
+    """Create a teacher OR link an existing teacher (by email) to this HOD's
+    branch. Same teacher can teach in CSE + CSE-DS (or any other combo) and
+    only receives the credentials email once — on FIRST creation."""
     admin = current["user"]
+
+    existing = db.query(models.Teacher).filter(models.Teacher.email == data.email).first()
+    if existing:
+        # Already in this HOD's branch?
+        link = db.query(models.TeacherBranch).filter(
+            models.TeacherBranch.teacher_id == existing.id,
+            models.TeacherBranch.branch_id == admin.branch_id,
+        ).first()
+        if link:
+            raise HTTPException(400, "Teacher already exists in your branch")
+        # Different branch — link them. No new password, no new email.
+        db.add(models.TeacherBranch(teacher_id=existing.id, branch_id=admin.branch_id))
+        # Optionally update phone if HOD provided one and existing has none
+        if data.phone and not existing.phone:
+            existing.phone = data.phone
+        db.commit()
+        return {
+            "id": existing.id,
+            "email": existing.email,
+            "name": existing.name,
+            "default_password": "",
+            "message": (
+                f"{existing.name} was already registered in another branch. "
+                f"Linked to your branch — no new email/credentials sent. "
+                f"They can use their existing login."
+            ),
+        }
+
     import secrets, string
     alphabet = string.ascii_letters + string.digits
     default_pwd = 'T' + ''.join(secrets.choice(alphabet) for _ in range(7))
@@ -296,7 +386,11 @@ def create_teacher(
         db.rollback()
         raise HTTPException(400, "Email already exists")
 
-    # Send credentials email (no-op if SMTP not configured)
+    # Mirror to teacher_branches for the brand-new teacher
+    db.add(models.TeacherBranch(teacher_id=teacher.id, branch_id=admin.branch_id))
+    db.commit()
+
+    # First-time only — credentials email
     from . import email_utils
     email_sent = email_utils.send_credentials_email(teacher.email, teacher.name, "Teacher", default_pwd)
 
@@ -315,8 +409,20 @@ def create_teacher(
 
 @app.get("/api/admin/teachers", response_model=List[schemas.TeacherOut])
 def list_teachers(current=Depends(auth.require_role("admin")), db: Session = Depends(get_db)):
+    """All teachers attached to this HOD's branch — including cross-branch
+    teachers whose primary branch is different but who teach a subject here."""
     admin = current["user"]
-    return db.query(models.Teacher).filter(models.Teacher.branch_id == admin.branch_id).all()
+    # Eager bulk fetch: one query for all teacher ids in this branch, then one
+    # for the teacher rows. No N+1.
+    linked_ids = [
+        tb.teacher_id for tb in
+        db.query(models.TeacherBranch).filter(
+            models.TeacherBranch.branch_id == admin.branch_id
+        ).all()
+    ]
+    if not linked_ids:
+        return []
+    return db.query(models.Teacher).filter(models.Teacher.id.in_(linked_ids)).all()
 
 
 @app.patch("/api/admin/teachers/{teacher_id}", response_model=schemas.TeacherOut)
@@ -327,10 +433,7 @@ def update_teacher(
     db: Session = Depends(get_db)
 ):
     admin = current["user"]
-    teacher = db.query(models.Teacher).filter(
-        models.Teacher.id == teacher_id,
-        models.Teacher.branch_id == admin.branch_id
-    ).first()
+    teacher = _teacher_in_admin_branch(db, teacher_id, admin.branch_id)
     if not teacher:
         raise HTTPException(404, "Teacher not found")
     if data.name is not None: teacher.name = data.name
@@ -348,16 +451,297 @@ def delete_teacher(
     current=Depends(auth.require_role("admin")),
     db: Session = Depends(get_db)
 ):
+    """Unlink teacher from THIS HOD's branch. If the teacher still teaches
+    in another branch (TeacherBranch row exists) the user account stays
+    intact — only the link is removed. Otherwise the teacher is fully deleted."""
     admin = current["user"]
-    teacher = db.query(models.Teacher).filter(
-        models.Teacher.id == teacher_id,
-        models.Teacher.branch_id == admin.branch_id
-    ).first()
+    teacher = _teacher_in_admin_branch(db, teacher_id, admin.branch_id)
     if not teacher:
         raise HTTPException(404, "Teacher not found")
+
+    # Block delete if the teacher still has subjects in this branch.
+    has_subjects_here = db.query(models.Subject).filter(
+        models.Subject.teacher_id == teacher_id,
+        models.Subject.branch_id == admin.branch_id,
+    ).first()
+    if has_subjects_here:
+        raise HTTPException(
+            400,
+            "Cannot remove: teacher is assigned to subjects in your branch. "
+            "Reassign or delete those subjects first."
+        )
+
+    # Drop the link for this branch
+    db.query(models.TeacherBranch).filter(
+        models.TeacherBranch.teacher_id == teacher_id,
+        models.TeacherBranch.branch_id == admin.branch_id,
+    ).delete()
+
+    # Any other branches still using this teacher?
+    other_links = db.query(models.TeacherBranch).filter(
+        models.TeacherBranch.teacher_id == teacher_id,
+    ).count()
+
+    if other_links > 0:
+        # Keep the teacher account; if their primary branch was THIS branch,
+        # promote one of the remaining branches to primary so logins still work.
+        if teacher.branch_id == admin.branch_id:
+            new_primary = db.query(models.TeacherBranch).filter(
+                models.TeacherBranch.teacher_id == teacher_id
+            ).first()
+            teacher.branch_id = new_primary.branch_id
+        db.commit()
+        return {"success": True, "unlinked_only": True}
+
+    # No links left → fully delete (cascade attendance/subjects-elsewhere cleanup)
+    db.query(models.AttendanceRecord).filter(
+        models.AttendanceRecord.marked_by_teacher_id == teacher_id
+    ).update({models.AttendanceRecord.marked_by_teacher_id: None})
     db.delete(teacher)
     db.commit()
     return {"success": True}
+
+
+# ---- Bulk student import (HOD uploads CSV/XLSX from Google Form export) ----
+class BulkStudentRow(BaseModel):
+    reg_no: str
+    name: str
+    date_of_birth: date
+    student_type: Optional[str] = "regular"
+    phone: Optional[str] = None
+    current_semester: Optional[int] = None  # falls back to body.current_semester
+
+
+class BulkImportRequest(BaseModel):
+    batch_id: int
+    current_semester: int
+    rows: List[BulkStudentRow]
+
+
+# ---- File-based bulk import: HOD uploads a .csv / .xlsx straight from
+#      Google Form export. Single endpoint handles both formats so the
+#      mobile UI just hands over the picked file and forgets about parsing. ----
+
+def _norm_header(s: str) -> str:
+    return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
+
+
+_HEADER_ALIASES = {
+    "reg_no":       {"regno", "registration", "registrationno", "registrationnumber",
+                     "enrollmentno", "enrollment", "rollno", "roll"},
+    "name":         {"name", "fullname", "studentname"},
+    "dob":          {"dob", "dateofbirth", "birthdate", "birthday"},
+    "type":         {"type", "studenttype", "category"},
+    "phone":        {"phone", "mobile", "contact", "phoneno", "mobileno", "whatsapp"},
+    "semester":     {"semester", "currentsemester", "sem"},
+}
+
+
+def _detect_columns(headers: List[str]) -> dict:
+    norm = [_norm_header(h) for h in headers]
+    out = {}
+    for key, aliases in _HEADER_ALIASES.items():
+        out[key] = next((i for i, h in enumerate(norm) if h in aliases), -1)
+    return out
+
+
+def _parse_dob(s) -> Optional[date]:
+    """Liberal DOB parser. Sheets/Forms emit DD/MM/YYYY most often, but
+    we also accept ISO and a few other separators. Returns None on fail."""
+    if s is None:
+        return None
+    if isinstance(s, date) and not isinstance(s, datetime):
+        return s
+    if isinstance(s, datetime):
+        return s.date()
+    s = str(s).strip()
+    if not s:
+        return None
+    import re
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = re.match(r"^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})", s)
+    if m:
+        d, mo, y = m.group(1), m.group(2), m.group(3)
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return date(int(y), int(mo), int(d))
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_type(v) -> str:
+    s = _norm_header(v)
+    if not s:
+        return "regular"
+    if "lateral" in s or s == "le":
+        return "lateral_entry"
+    if "back" in s:
+        return "back_year"
+    return "regular"
+
+
+@app.post("/api/admin/students/bulk-upload")
+async def bulk_upload_students(
+    batch_id: int = Form(...),
+    current_semester: int = Form(...),
+    file: UploadFile = File(...),
+    current=Depends(auth.require_role("admin")),
+    db: Session = Depends(get_db)
+):
+    """HOD picks a CSV / XLSX file (e.g. Google Sheets → Download → CSV).
+    Required header columns: reg_no, name, dob. Optional: type, phone, semester.
+    Header names are matched case-insensitively with a small alias list."""
+    admin = current["user"]
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Empty file")
+
+    fname = (file.filename or "").lower()
+    rows_data: List[List] = []
+    try:
+        if fname.endswith(".xlsx") or fname.endswith(".xls"):
+            from openpyxl import load_workbook
+            wb = load_workbook(BytesIO(raw), data_only=True, read_only=True)
+            ws = wb.active
+            for r in ws.iter_rows(values_only=True):
+                if any(cell is not None and str(cell).strip() != "" for cell in r):
+                    rows_data.append(list(r))
+        else:
+            # CSV / TSV — sniff delimiter on header line
+            import csv as _csv, io as _io
+            text = raw.decode("utf-8-sig", errors="replace")
+            first_line = text.split("\n", 1)[0]
+            delim = "\t" if "\t" in first_line and "," not in first_line else ","
+            reader = _csv.reader(_io.StringIO(text), delimiter=delim)
+            for row in reader:
+                if any((c or "").strip() for c in row):
+                    rows_data.append(row)
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse file: {e}")
+
+    if len(rows_data) < 2:
+        raise HTTPException(400, "Need a header row + at least one data row.")
+
+    cols = _detect_columns(rows_data[0])
+    if cols["reg_no"] == -1 or cols["name"] == -1 or cols["dob"] == -1:
+        raise HTTPException(400, "Missing required columns. Need reg_no, name, dob.")
+
+    # Reuse the same insertion logic as the JSON endpoint via a virtual list
+    parsed: List[BulkStudentRow] = []
+    parse_warnings: List[dict] = []
+    for li, row in enumerate(rows_data[1:], start=2):
+        def cell(i):
+            return row[i] if i != -1 and i < len(row) else None
+        reg = (str(cell(cols["reg_no"]) or "").strip())
+        nm = (str(cell(cols["name"]) or "").strip())
+        dob_val = _parse_dob(cell(cols["dob"]))
+        if not reg or not nm or not dob_val:
+            parse_warnings.append({"row": li, "reason": "Missing reg_no / name / dob"})
+            continue
+        sem_raw = cell(cols["semester"])
+        try:
+            sem = int(sem_raw) if sem_raw is not None and str(sem_raw).strip() else None
+        except (TypeError, ValueError):
+            sem = None
+        parsed.append(BulkStudentRow(
+            reg_no=reg,
+            name=nm,
+            date_of_birth=dob_val,
+            student_type=_normalize_type(cell(cols["type"])),
+            phone=(str(cell(cols["phone"]) or "").strip() or None),
+            current_semester=sem,
+        ))
+
+    if not parsed:
+        return {
+            "added": 0, "skipped_existing": 0,
+            "errors": parse_warnings, "total_rows": len(rows_data) - 1,
+            "parse_warnings": parse_warnings,
+        }
+
+    # Delegate to the same insertion logic
+    body = BulkImportRequest(
+        batch_id=batch_id, current_semester=current_semester, rows=parsed
+    )
+    result = bulk_import_students(body, current, db)
+    if parse_warnings:
+        result["parse_warnings"] = parse_warnings
+    return result
+
+
+@app.post("/api/admin/students/bulk")
+def bulk_import_students(
+    body: BulkImportRequest,
+    current=Depends(auth.require_role("admin")),
+    db: Session = Depends(get_db)
+):
+    """HOD bulk-uploads students collected from a Google Form / spreadsheet.
+    Existing reg_nos are skipped (not failed) so the same upload can be
+    re-run safely after corrections. Auto-enrolls in current semester subjects."""
+    admin = current["user"]
+
+    # Pre-load existing reg_nos to skip dup rows fast
+    existing_regs = {
+        r[0] for r in
+        db.query(models.Student.reg_no).filter(
+            models.Student.reg_no.in_([r.reg_no for r in body.rows])
+        ).all()
+    }
+
+    subjects = db.query(models.Subject).filter(
+        models.Subject.branch_id == admin.branch_id,
+        models.Subject.batch_id == body.batch_id,
+        models.Subject.semester == body.current_semester,
+    ).all()
+
+    added, skipped_existing, errors = 0, 0, []
+    for idx, row in enumerate(body.rows):
+        try:
+            if not row.reg_no or not row.name:
+                errors.append({"row": idx + 1, "reason": "Missing reg_no or name"})
+                continue
+            if row.reg_no in existing_regs:
+                skipped_existing += 1
+                continue
+            stype = row.student_type or "regular"
+            if stype not in ("regular", "lateral_entry", "back_year"):
+                stype = "regular"
+            sem = row.current_semester or body.current_semester
+            student = models.Student(
+                reg_no=row.reg_no.strip(),
+                name=row.name.strip(),
+                date_of_birth=row.date_of_birth,
+                branch_id=admin.branch_id,
+                batch_id=body.batch_id,
+                current_semester=sem,
+                student_type=stype,
+                phone=(row.phone or "").strip() or None,
+            )
+            db.add(student)
+            db.flush()
+            existing_regs.add(row.reg_no)
+            for subj in subjects:
+                if subj.semester == sem:
+                    db.add(models.Enrollment(student_id=student.id, subject_id=subj.id))
+            added += 1
+        except Exception as e:
+            errors.append({"row": idx + 1, "reason": str(e)[:120]})
+            db.rollback()
+
+    db.commit()
+    return {
+        "added": added,
+        "skipped_existing": skipped_existing,
+        "errors": errors,
+        "total_rows": len(body.rows),
+    }
 
 
 @app.post("/api/admin/students", response_model=schemas.StudentOut)
@@ -473,6 +857,21 @@ def create_subject(
     db: Session = Depends(get_db)
 ):
     admin = current["user"]
+
+    # Auto-link the assigned teacher to this branch if they aren't already.
+    # Lets a HOD assign a teacher whose primary branch is elsewhere — common
+    # for shared faculty (e.g. Sankalp Sonu teaching CSE + CSE-DS).
+    teacher = db.query(models.Teacher).filter(models.Teacher.id == data.teacher_id).first()
+    if not teacher:
+        raise HTTPException(404, "Teacher not found")
+    has_link = db.query(models.TeacherBranch).filter(
+        models.TeacherBranch.teacher_id == teacher.id,
+        models.TeacherBranch.branch_id == admin.branch_id,
+    ).first()
+    if not has_link:
+        db.add(models.TeacherBranch(teacher_id=teacher.id, branch_id=admin.branch_id))
+        db.commit()
+
     subject = models.Subject(
         code=data.code,
         name=data.name,
@@ -644,6 +1043,7 @@ def export_attendance(
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
+    from openpyxl.formatting.rule import CellIsRule
 
     teacher = current["user"]
     subj = db.query(models.Subject).filter(
@@ -815,7 +1215,11 @@ def export_attendance(
                        value=f'={present_letter}{r}/{total_letter}{r}')
         cpct.alignment = Alignment(horizontal="center", vertical="center")
         cpct.border = border
-        cpct.font = Font(bold=True, size=10, color="4F46E5")
+        # Per-bucket colour: green ≥ 75%, amber 60–<75%, red < 60%.
+        # Excel formulas haven't been evaluated at write time, so we use
+        # workbook-level conditional formatting (added once after the loop)
+        # for the colours and just bold the value here.
+        cpct.font = Font(bold=True, size=10)
         cpct.number_format = "0.0%"
 
         current_row += 1
@@ -850,6 +1254,38 @@ def export_attendance(
     fc.font = Font(size=9, italic=True, color="64748B")
     fc.fill = footer_fill
     fc.alignment = Alignment(horizontal="center", vertical="center")
+
+    # ===== Conditional formatting for the % column =====
+    # Bucket colours requested:
+    #   ≥ 75%      → safe (green)
+    #   60–<75%    → warning (amber)
+    #   < 60%      → critical (red)
+    # Cells contain a fraction (0–1) because of the "0.0%" format, so
+    # thresholds are 0.75 and 0.60.
+    if current_row > 5:
+        pct_col_letter = get_column_letter(4 + total_days + 4)
+        pct_range = f"{pct_col_letter}5:{pct_col_letter}{current_row - 1}"
+        green_fill  = PatternFill("solid", start_color="D1FAE5")
+        green_font  = Font(bold=True, color="047857", size=10)
+        amber_fill  = PatternFill("solid", start_color="FEF3C7")
+        amber_font  = Font(bold=True, color="B45309", size=10)
+        red_fill    = PatternFill("solid", start_color="FEE2E2")
+        red_font    = Font(bold=True, color="B91C1C", size=10)
+        ws.conditional_formatting.add(
+            pct_range,
+            CellIsRule(operator="greaterThanOrEqual", formula=["0.75"],
+                       fill=green_fill, font=green_font, stopIfTrue=True),
+        )
+        ws.conditional_formatting.add(
+            pct_range,
+            CellIsRule(operator="greaterThanOrEqual", formula=["0.60"],
+                       fill=amber_fill, font=amber_font, stopIfTrue=True),
+        )
+        ws.conditional_formatting.add(
+            pct_range,
+            CellIsRule(operator="lessThan", formula=["0.60"],
+                       fill=red_fill, font=red_font, stopIfTrue=True),
+        )
 
     # Column widths
     ws.column_dimensions['A'].width = 6    # S.No
@@ -943,6 +1379,7 @@ def export_attendance_pdf(
 
     s_no = 0
     group_rows = []
+    pct_color_rows = []  # (row_index_in_data, color_hex) for % column shading
 
     def add_group(label):
         group_rows.append(len(data))
@@ -958,6 +1395,13 @@ def export_attendance_pdf(
         row += [rec_map.get((s.id, d), "A") for d in dates]
         row += [present, absent, total_days, f"{pct:.1f}%"]
         data.append(row)
+        # Bucket colour: ≥75 green, 60–<75 amber, <60 red
+        if pct >= 75:
+            pct_color_rows.append((len(data) - 1, "#047857", "#D1FAE5"))
+        elif pct >= 60:
+            pct_color_rows.append((len(data) - 1, "#B45309", "#FEF3C7"))
+        else:
+            pct_color_rows.append((len(data) - 1, "#B91C1C", "#FEE2E2"))
 
     for yr in sorted(back_groups.keys()):
         add_group(f"  {yr} Batch (Back Year)")
@@ -1030,6 +1474,13 @@ def export_attendance_pdf(
                 style.add('BACKGROUND', (ci, r), (ci, r), colors.HexColor('#FEE2E2'))
                 style.add('TEXTCOLOR',  (ci, r), (ci, r), colors.HexColor('#DC2626'))
         style.add('FONTNAME', (4, r), (4 + total_days - 1, r), 'Helvetica-Bold')
+
+    # Per-row colouring for the % column (last column)
+    pct_col_idx = len(headers) - 1
+    for r, txt, bg in pct_color_rows:
+        style.add('BACKGROUND', (pct_col_idx, r), (pct_col_idx, r), colors.HexColor(bg))
+        style.add('TEXTCOLOR',  (pct_col_idx, r), (pct_col_idx, r), colors.HexColor(txt))
+        style.add('FONTNAME',   (pct_col_idx, r), (pct_col_idx, r), 'Helvetica-Bold')
 
     tbl.setStyle(style)
     elements.append(tbl)
@@ -1272,57 +1723,70 @@ def delete_batch(
 
 
 # ============ DRILL-DOWN VIEWS (Super Admin clickable cards) ============
+# These endpoints power the "tap a card → see all rows" listings on the
+# super-admin dashboard. They MUST be fast even for thousands of rows
+# (Render free-tier + Supabase pooler can chug on N+1 queries).
+# Strategy: pre-fetch the lookup tables (branches, batches) into dicts,
+# then build the response in pure-Python — exactly 2-4 queries total
+# regardless of row count.
+
 @app.get("/api/superadmin/all-teachers")
 def all_teachers(current=Depends(auth.require_role("superadmin")), db: Session = Depends(get_db)):
-    teachers = db.query(models.Teacher).all()
+    branch_map = {b.id: b for b in db.query(models.Branch).all()}
+    # Pre-build "teacher_id → list of branch codes" via TeacherBranch so we
+    # can show "CSE, CSE-DS" for cross-branch teachers in a single column.
+    tb_rows = db.query(models.TeacherBranch).all()
+    teacher_branches = {}
+    for tb in tb_rows:
+        teacher_branches.setdefault(tb.teacher_id, []).append(tb.branch_id)
+
+    teachers = db.query(models.Teacher).order_by(models.Teacher.name).all()
     result = []
     for t in teachers:
-        branch = db.query(models.Branch).filter(models.Branch.id == t.branch_id).first()
+        b_ids = teacher_branches.get(t.id) or ([t.branch_id] if t.branch_id else [])
+        codes = [branch_map[bid].code for bid in b_ids if bid in branch_map]
+        # Primary branch (the home/first one) — used for the colored badge in UI
+        primary = branch_map.get(t.branch_id)
         result.append({
             "id": t.id, "name": t.name, "email": t.email,
             "phone": t.phone, "is_verified": t.is_verified,
-            "branch_code": branch.code if branch else None,
-            "branch_name": branch.name if branch else None,
+            "branch_code": primary.code if primary else (codes[0] if codes else None),
+            "branch_name": primary.name if primary else None,
+            "branch_codes": codes,  # full list for cross-branch display
         })
     return result
 
 
 @app.get("/api/superadmin/all-students")
 def all_students(current=Depends(auth.require_role("superadmin")), db: Session = Depends(get_db)):
-    students = db.query(models.Student).all()
-    result = []
-    for s in students:
-        branch = db.query(models.Branch).filter(models.Branch.id == s.branch_id).first()
-        batch = db.query(models.Batch).filter(models.Batch.id == s.batch_id).first()
-        result.append({
-            "id": s.id, "reg_no": s.reg_no, "name": s.name,
-            "branch_code": branch.code if branch else None,
-            "batch": batch.name if batch else None,
-            "semester": s.current_semester,
-            "student_type": s.student_type,
-            "is_verified": s.is_verified,
-        })
-    return result
+    branch_map = {b.id: b.code for b in db.query(models.Branch).all()}
+    batch_map = {b.id: b.name for b in db.query(models.Batch).all()}
+    students = db.query(models.Student).order_by(models.Student.reg_no).all()
+    return [{
+        "id": s.id, "reg_no": s.reg_no, "name": s.name,
+        "branch_code": branch_map.get(s.branch_id),
+        "batch": batch_map.get(s.batch_id),
+        "semester": s.current_semester,
+        "student_type": s.student_type,
+        "is_verified": s.is_verified,
+    } for s in students]
 
 
 @app.get("/api/superadmin/all-subjects")
 def all_subjects(current=Depends(auth.require_role("superadmin")), db: Session = Depends(get_db)):
-    subjects = db.query(models.Subject).all()
-    result = []
-    for s in subjects:
-        branch = db.query(models.Branch).filter(models.Branch.id == s.branch_id).first()
-        batch = db.query(models.Batch).filter(models.Batch.id == s.batch_id).first()
-        teacher = db.query(models.Teacher).filter(models.Teacher.id == s.teacher_id).first()
-        result.append({
-            "id": s.id, "code": s.code, "name": s.name,
-            "branch_code": branch.code if branch else None,
-            "batch": batch.name if batch else None,
-            "semester": s.semester,
-            "credits": s.credits,
-            "session": s.session,
-            "teacher_name": teacher.name if teacher else None,
-        })
-    return result
+    branch_map = {b.id: b.code for b in db.query(models.Branch).all()}
+    batch_map = {b.id: b.name for b in db.query(models.Batch).all()}
+    teacher_map = {t.id: t.name for t in db.query(models.Teacher).all()}
+    subjects = db.query(models.Subject).order_by(models.Subject.code).all()
+    return [{
+        "id": s.id, "code": s.code, "name": s.name,
+        "branch_code": branch_map.get(s.branch_id),
+        "batch": batch_map.get(s.batch_id),
+        "semester": s.semester,
+        "credits": s.credits,
+        "session": s.session,
+        "teacher_name": teacher_map.get(s.teacher_id),
+    } for s in subjects]
 
 
 # ============ TEACHER ATTENDANCE DASHBOARD ============
