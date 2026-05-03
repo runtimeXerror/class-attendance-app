@@ -1,60 +1,71 @@
 """
-Email utility — sends credentials when SMTP is configured via env vars.
-If not configured, logs to console and doesn't crash.
+Email utility — sends credentials via either:
 
-Env vars:
-  SMTP_HOST     (e.g. smtp.gmail.com)
-  SMTP_PORT     (465 for SMTPS or 587 for STARTTLS — both routes are
-                 tried automatically; this just hints which to try first)
-  SMTP_USER     (your email)
-  SMTP_PASSWORD (Gmail App Password — NOT your normal Gmail login)
-  SMTP_FROM     (defaults to SMTP_USER)
+  1. **Brevo** (preferred, HTTPS API, works on Render free tier)
+       - Sign up at https://brevo.com (free, 300 emails/day = ~9000/month)
+       - Verify a sender email (your gmail), generate an API key
+       - Set BREVO_API_KEY + BREVO_SENDER_EMAIL on Render
+  2. **SMTP** (Gmail / any) — fallback for local dev or paid Render
+       - Render free tier BLOCKS outbound SMTP on ports 465 / 587, so
+         on free Render this path will time out. Brevo is the answer there.
 
-Render free tier note:
-  Outbound SMTP from Render dynos sometimes fails on IPv6 with
-  "[Errno 101] Network is unreachable" because the dyno's IPv6 route
-  doesn't reach Gmail's IPv6 endpoints. We work around this by patching
-  socket.getaddrinfo for the duration of the SMTP call so that only
-  IPv4 results are returned. The hostname is preserved end-to-end so
-  TLS / SNI keeps validating against smtp.gmail.com correctly.
+Why Brevo and not SMTP on Render free?
+  Render's free tier blocks outbound TCP to common SMTP submission ports
+  (network policy to prevent spam abuse from free dynos). HTTPS to
+  api.brevo.com is permitted, so we send via their REST API.
+
+Env vars (any one set is enough):
+  BREVO_API_KEY        Brevo API key (xkeysib-...)
+  BREVO_SENDER_EMAIL   Verified sender (your gmail)
+  BREVO_SENDER_NAME    Display name (default "Class Attendance")
+
+  SMTP_HOST            e.g. smtp.gmail.com (used only if Brevo not set)
+  SMTP_PORT            465 (SMTPS) or 587 (STARTTLS)
+  SMTP_USER            smtp login email
+  SMTP_PASSWORD        Gmail App Password (16 chars)
+  SMTP_FROM            From-address (defaults to SMTP_USER)
 """
 import os
+import json
 import socket
 import smtplib
 import ssl
 import logging
 import contextlib
+import urllib.request
+import urllib.error
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 logger = logging.getLogger(__name__)
 
 
+# ---------- Provider detection ----------
+
+def _brevo_configured() -> bool:
+    return bool(os.getenv("BREVO_API_KEY") and os.getenv("BREVO_SENDER_EMAIL"))
+
+
+def _smtp_configured() -> bool:
+    return bool(
+        os.getenv("SMTP_HOST")
+        and os.getenv("SMTP_USER")
+        and os.getenv("SMTP_PASSWORD")
+    )
+
+
 def is_configured() -> bool:
-    return bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("SMTP_PASSWORD"))
+    """Either Brevo OR SMTP is enough — caller doesn't need to care which."""
+    return _brevo_configured() or _smtp_configured()
 
 
-@contextlib.contextmanager
-def _ipv4_only():
-    """Temporarily restrict socket.getaddrinfo to IPv4 results.
-    Preserves hostnames (so SSL SNI / cert checks against smtp.gmail.com
-    keep working) while sidestepping Render's broken IPv6 routes."""
-    orig = socket.getaddrinfo
+# ---------- Shared message body ----------
 
-    def patched(host, port, family=0, type=0, proto=0, flags=0):
-        # Force AF_INET regardless of what caller asked for, then call orig.
-        return orig(host, port, socket.AF_INET, type, proto, flags)
-
-    socket.getaddrinfo = patched
-    try:
-        yield
-    finally:
-        socket.getaddrinfo = orig
+SUBJECT = "Your Class Attendance Login Credentials"
 
 
-def _build_message(to_email: str, name: str, role: str, default_password: str, from_addr: str):
-    subject = "Your Class Attendance Login Credentials"
-    body = f"""Hi {name},
+def _build_body(to_email: str, name: str, role: str, default_password: str) -> str:
+    return f"""Hi {name},
 
 Your account password at 'Class Attendance — RRSDCE Begusarai' as follows.
 
@@ -74,25 +85,93 @@ Cheers from the 'Class Attendance' administrator,
 Admin, Class Attendance
 @ RRSDCE Begusarai • Developed by Vishal Kumar
 """
+
+
+# ---------- Brevo HTTPS API path ----------
+
+def _send_via_brevo(to_email: str, name: str, role: str, default_password: str) -> bool:
+    api_key = os.getenv("BREVO_API_KEY")
+    sender = os.getenv("BREVO_SENDER_EMAIL")
+    sender_name = os.getenv("BREVO_SENDER_NAME", "Class Attendance")
+
+    body = _build_body(to_email, name, role, default_password)
+    payload = {
+        "sender":      {"email": sender, "name": sender_name},
+        "to":          [{"email": to_email, "name": name}],
+        "subject":     SUBJECT,
+        "textContent": body,
+    }
+
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "api-key":      api_key,
+            "Content-Type": "application/json",
+            "Accept":       "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status = resp.status if hasattr(resp, "status") else resp.getcode()
+            if status in (200, 201, 202):
+                logger.info(f"[EMAIL:SENT] {to_email} via Brevo (HTTP {status})")
+                return True
+            logger.error(f"[EMAIL:FAIL] Brevo returned HTTP {status} for {to_email}")
+            return False
+    except urllib.error.HTTPError as e:
+        # 4xx → almost always API key wrong / sender not verified
+        body_text = ""
+        try:
+            body_text = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        logger.error(
+            f"[EMAIL:FAIL] Brevo HTTP {e.code} for {to_email}: {body_text}"
+        )
+        return False
+    except Exception as e:
+        logger.error(f"[EMAIL:FAIL] Brevo {type(e).__name__}: {e}")
+        return False
+
+
+# ---------- SMTP path (Gmail etc.) ----------
+
+@contextlib.contextmanager
+def _ipv4_only():
+    """Patch socket.getaddrinfo to return IPv4 results only.
+    Renders' broken IPv6 routing causes errno 101; this sidesteps it
+    while preserving the hostname for SNI / TLS cert validation."""
+    orig = socket.getaddrinfo
+
+    def patched(host, port, family=0, type=0, proto=0, flags=0):
+        return orig(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = patched
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = orig
+
+
+def _build_mime(to_email, name, role, default_password, from_addr):
     msg = MIMEMultipart()
     msg["From"] = from_addr
     msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
+    msg["Subject"] = SUBJECT
+    msg.attach(MIMEText(_build_body(to_email, name, role, default_password), "plain"))
     return msg
 
 
-def _try_smtps_465(host, user, password, msg, timeout=15):
-    """Pure SSL on port 465 — most reliable on Render."""
+def _try_smtps_465(host, user, password, msg, timeout=10):
     ctx = ssl.create_default_context()
-    # Hostname stays for SNI; IPv4-only is enforced by the outer ctx manager.
     with smtplib.SMTP_SSL(host, 465, context=ctx, timeout=timeout) as s:
         s.login(user, password)
         s.send_message(msg)
 
 
-def _try_starttls_587(host, user, password, msg, timeout=15):
-    """STARTTLS on port 587 — Gmail's "modern" submission route."""
+def _try_starttls_587(host, user, password, msg, timeout=10):
     ctx = ssl.create_default_context()
     with smtplib.SMTP(host, 587, timeout=timeout) as s:
         s.ehlo()
@@ -102,29 +181,14 @@ def _try_starttls_587(host, user, password, msg, timeout=15):
         s.send_message(msg)
 
 
-def send_credentials_email(to_email: str, name: str, role: str, default_password: str) -> bool:
-    """Send login credentials email. Safe no-op if SMTP env missing.
-    Returns True on success, False otherwise.
-
-    NOTE: Callers that don't want to block on SMTP latency (~3-15 s) should
-    schedule this via FastAPI BackgroundTasks instead of awaiting it inline."""
-    if not is_configured():
-        logger.info(
-            f"[EMAIL:SKIP] SMTP not configured. Would email {to_email}: {role} / {default_password}"
-        )
-        return False
-
+def _send_via_smtp(to_email: str, name: str, role: str, default_password: str) -> bool:
     host = os.getenv("SMTP_HOST")
     user = os.getenv("SMTP_USER")
     password = os.getenv("SMTP_PASSWORD")
     from_addr = os.getenv("SMTP_FROM", user)
-    # Hint which port to try first. 465 (SMTPS) is the more reliable default
-    # on Render — STARTTLS:587 occasionally hangs there. Either way, we
-    # fall back to the other if the preferred fails.
     preferred_port = int(os.getenv("SMTP_PORT", "465"))
 
-    msg = _build_message(to_email, name, role, default_password, from_addr)
-
+    msg = _build_mime(to_email, name, role, default_password, from_addr)
     attempts = (
         [("SMTPS:465", _try_smtps_465), ("STARTTLS:587", _try_starttls_587)]
         if preferred_port == 465
@@ -142,5 +206,26 @@ def send_credentials_email(to_email: str, name: str, role: str, default_password
                 last_err = f"{label} → {type(e).__name__}: {e}"
                 logger.warning(f"[EMAIL:RETRY] {label} failed for {to_email}: {e}")
 
-    logger.error(f"[EMAIL:FAIL] All routes failed for {to_email}. Last: {last_err}")
+    logger.error(f"[EMAIL:FAIL] SMTP failed for {to_email}. Last: {last_err}")
+    return False
+
+
+# ---------- Public entrypoint ----------
+
+def send_credentials_email(to_email: str, name: str, role: str, default_password: str) -> bool:
+    """Try Brevo first (HTTPS, works on Render free); fall back to SMTP.
+    Safe no-op if neither is configured. Returns True on success."""
+    if _brevo_configured():
+        if _send_via_brevo(to_email, name, role, default_password):
+            return True
+        logger.warning(f"[EMAIL] Brevo failed for {to_email}; trying SMTP next")
+
+    if _smtp_configured():
+        return _send_via_smtp(to_email, name, role, default_password)
+
+    if not _brevo_configured():
+        logger.info(
+            f"[EMAIL:SKIP] No provider configured. Would email {to_email}: "
+            f"{role} / {default_password}"
+        )
     return False
