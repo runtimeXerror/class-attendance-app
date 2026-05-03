@@ -4,6 +4,7 @@ import {
   TouchableOpacity, FlatList, Modal, Pressable, Dimensions,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api, API_URL, downloadFile, saveToDevice, shareFile } from '../../lib/api';
 import { useTheme } from '../../lib/ThemeContext';
 import { Radius, Shadow } from '../../lib/theme';
@@ -22,13 +23,24 @@ export default function TeacherAttendanceDashboard() {
   // shape: { kind: 'dates' | 'students', title, items, color? }
   const [filterModal, setFilterModal] = useState(null);
 
+  // Per-subject cache so jumping back-and-forth is instant.
+  const cacheKey = `teacher_dash_${subjectId}`;
+
   const load = async () => {
+    // 1) Cached render first (no network) — UI never sits blank.
+    try {
+      const cached = await AsyncStorage.getItem(cacheKey);
+      if (cached && !data) setData(JSON.parse(cached));
+    } catch (_) {}
+
     setLoading(true);
     try {
       const res = await api.get(`/api/teacher/dashboard/${subjectId}`);
       setData(res.data);
+      AsyncStorage.setItem(cacheKey, JSON.stringify(res.data)).catch(() => {});
     } catch (e) {
-      Alert.alert('Error', e.response?.data?.detail || e.message);
+      // Keep cached UI if network fails; only alert when there's nothing to show.
+      if (!data) Alert.alert('Error', e.response?.data?.detail || e.message);
     }
     setLoading(false);
   };

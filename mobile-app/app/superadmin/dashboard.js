@@ -138,10 +138,23 @@ export default function SuperAdminDashboard() {
       setAdminForm({ email: '', name: '', branch_id: null, phone: '' });
       load();
       openView('admins');
-      Alert.alert(
-        '✓ HOD Created',
-        `${res.data.message}\n\nEmail: ${res.data.email}\nDefault password: ${res.data.default_password}\n\n(HOD will be forced to change on first login)`
-      );
+      // Hide password from screen when it was emailed; only show as fallback
+      // if the backend says the email couldn't be sent.
+      if (res.data.email_sent) {
+        Alert.alert(
+          '✓ HOD Created',
+          `Credentials have been emailed to ${res.data.email}.\n\n` +
+          `The HOD must check their inbox (and spam folder) and change the password on first login.`
+        );
+      } else {
+        Alert.alert(
+          '⚠ Email Not Sent — Share Manually',
+          `Email: ${res.data.email}\n` +
+          `Default Password: ${res.data.default_password}\n\n` +
+          `SMTP is not configured. Share these credentials with the HOD securely.\n` +
+          `(HOD will be forced to change on first login)`
+        );
+      }
     } catch (e) {
       Alert.alert('Error', e.response?.data?.detail || e.message);
     }

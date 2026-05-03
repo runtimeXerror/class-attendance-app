@@ -100,12 +100,15 @@ class AdminOut(BaseModel):
 
 
 class AdminCreateResponse(BaseModel):
-    """Returned when creating a new branch admin — includes auto-password for super admin to share."""
+    """Returned when creating a new branch HOD. Password is hidden from the
+    super-admin screen when SMTP is configured (the HOD gets it via email);
+    only returned as a manual-share fallback when SMTP is not set up."""
     id: int
     email: str
     name: str
     branch_code: str
     default_password: str
+    email_sent: bool = False
     message: str
 
 
@@ -140,7 +143,11 @@ class TeacherCreateResponse(BaseModel):
     id: int
     email: str
     name: str
+    # Empty string when credentials were emailed successfully (we don't want
+    # passwords lingering in the HOD's screen / clipboard / screenshots).
+    # Only populated as a fallback when SMTP isn't configured.
     default_password: str
+    email_sent: bool = False
     message: str
 
 

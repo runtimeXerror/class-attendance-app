@@ -3,6 +3,7 @@ import {
   View, Text, FlatList, StyleSheet, Alert, Image, TouchableOpacity, Modal, Pressable,
 } from 'react-native';
 import { router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api, getAuth, API_URL, downloadFile, saveToDevice, shareFile } from '../../lib/api';
 import { useTheme } from '../../lib/ThemeContext';
 import { Radius, Shadow } from '../../lib/theme';
@@ -22,18 +23,35 @@ export default function TeacherDashboard() {
   const [profileImage, setProfileImage] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // ⚡ Instant-render trick: hydrate from a tiny AsyncStorage cache the
+  // moment the screen mounts (zero network), then refresh in the background.
+  // Render free-tier cold starts can take 30+ s — without the cache the
+  // teacher saw a blank dashboard for 10-15 s every login.
+  const CACHE_KEY = 'teacher_subjects_cache';
+
   const load = async () => {
     const auth = await getAuth();
     if (auth.role !== 'teacher') { router.replace('/'); return; }
     setName(auth.name || '');
     setBranchCode(auth.branch_code || '');
     setProfileImage(auth.profile_image || null);
-    setLoading(true);
+
+    // 1) Hydrate from cache instantly so the UI is never blank.
+    try {
+      const cached = await AsyncStorage.getItem(CACHE_KEY);
+      if (cached) setSubjects(JSON.parse(cached));
+    } catch (_) {}
+
+    // 2) Refresh in the background. Only show spinner if we had no cache.
+    const hadCache = subjects.length > 0;
+    if (!hadCache) setLoading(true);
     try {
       const res = await api.get('/api/teacher/subjects');
       setSubjects(res.data);
+      AsyncStorage.setItem(CACHE_KEY, JSON.stringify(res.data)).catch(() => {});
     } catch (e) {
-      Alert.alert('Error', e.response?.data?.detail || e.message);
+      // Don't blow away the cached UI on a network error
+      if (!hadCache) Alert.alert('Error', e.response?.data?.detail || e.message);
     }
     setLoading(false);
   };

@@ -43,9 +43,11 @@ export default function SubjectDetail() {
     );
   }
 
+  // Buckets locked across the whole app (Excel/PDF/teacher/student):
+  //   Safe ≥ 75   |   Warning 60-<75   |   Critical < 60
   const getColorByPct = (pct) => {
     if (pct >= 75) return { bg: theme.successLight, text: theme.success };
-    if (pct >= 50) return { bg: theme.warningLight, text: theme.warning };
+    if (pct >= 60) return { bg: theme.warningLight, text: theme.warning };
     return { bg: theme.dangerLight, text: theme.danger };
   };
 
@@ -55,10 +57,10 @@ export default function SubjectDetail() {
   const total = data.summary.total_classes;
 
   const tabs = [
-    { key: "summary", label: "Summary", icon: "📊" },
-    { key: "present", label: "Present", icon: "✓" },
-    { key: "absent", label: "Absent", icon: "✗" },
-    { key: "analysis", label: "Analysis", icon: "📈" },
+    { key: "summary", label: "Summary" },
+    { key: "present", label: "Present" },
+    { key: "absent", label: "Absent" },
+    { key: "analysis", label: "Analysis" },
   ];
 
   return (
@@ -97,9 +99,8 @@ export default function SubjectDetail() {
               onPress={() => setActiveTab(t.key)}
               activeOpacity={0.7}
             >
-              <Text style={{ fontSize: 14 }}>{t.icon}</Text>
               <Text style={{
-                fontSize: 11, fontWeight: "700", marginTop: 2,
+                fontSize: 13, fontWeight: "700",
                 color: activeTab === t.key ? "#fff" : theme.textSecondary,
               }}>
                 {t.label}
@@ -162,7 +163,7 @@ export default function SubjectDetail() {
         {activeTab === "present" && (
           <View>
             <Text style={[styles.listTitle, { color: theme.text }]}>
-              ✓ Present on {data.present_dates.length} days
+              Present on {data.present_dates.length} days
             </Text>
             {data.present_dates.length === 0 ? (
               <Text style={[styles.empty, { color: theme.textMuted }]}>No present records yet</Text>
@@ -172,7 +173,7 @@ export default function SubjectDetail() {
                 .map((r, i) => (
                   <View key={i} style={[styles.dateRow, { backgroundColor: theme.successLight }]}>
                     <View style={{ flex: 1 }}>
-                      <Text style={[styles.dateTxt, { color: theme.text }]}>📅 {r.date}</Text>
+                      <Text style={[styles.dateTxt, { color: theme.text }]}>{r.date}</Text>
                     </View>
                     <View style={[styles.statusDot, { backgroundColor: theme.success }]}>
                       <Text style={{ color: "#fff", fontWeight: "800" }}>P</Text>
@@ -189,11 +190,11 @@ export default function SubjectDetail() {
         {activeTab === "absent" && (
           <View>
             <Text style={[styles.listTitle, { color: theme.text }]}>
-              ✗ Absent on {data.absent_dates.length} days
+              Absent on {data.absent_dates.length} days
             </Text>
             {data.absent_dates.length === 0 ? (
               <Text style={[styles.empty, { color: theme.textMuted }]}>
-                Perfect record! No absents 🎉
+                Perfect record! No absents.
               </Text>
             ) : (
               data.all_records
@@ -201,7 +202,7 @@ export default function SubjectDetail() {
                 .map((r, i) => (
                   <View key={i} style={[styles.dateRow, { backgroundColor: theme.dangerLight }]}>
                     <View style={{ flex: 1 }}>
-                      <Text style={[styles.dateTxt, { color: theme.text }]}>📅 {r.date}</Text>
+                      <Text style={[styles.dateTxt, { color: theme.text }]}>{r.date}</Text>
                     </View>
                     <View style={[styles.statusDot, { backgroundColor: theme.danger }]}>
                       <Text style={{ color: "#fff", fontWeight: "800" }}>A</Text>
@@ -239,7 +240,7 @@ export default function SubjectDetail() {
 
             {/* ── Animated Bar Graph ── */}
             <View style={[styles.chartCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
-              <Text style={[styles.chartTitle, { color: theme.text }]}>📊 Class Breakdown</Text>
+              <Text style={[styles.chartTitle, { color: theme.text }]}>Class Breakdown</Text>
               <Text style={{ fontSize: 11, color: theme.textMuted, marginBottom: 14, fontStyle: "italic" }}>
                 Tap & hold bar to see details
               </Text>
@@ -305,15 +306,15 @@ export default function SubjectDetail() {
                 {data.analysis.status === "Safe"
                   ? "Attendance is above 75%. Keep it up!"
                   : data.analysis.status === "Warning"
-                  ? "Attendance between 50–75%. Be careful."
-                  : "Attendance below 50%. Urgent action needed."}
+                  ? "Attendance between 60–75%. Be careful."
+                  : "Attendance below 60%. Urgent action needed."}
               </Text>
             </View>
 
             {/* ── Classes needed ── */}
             {data.summary.percentage < 75 && data.analysis.classes_needed_for_75 > 0 && (
               <View style={[styles.infoCard, { backgroundColor: theme.warningLight }]}>
-                <Text style={[styles.infoTitle, { color: theme.text }]}>🎯 Classes Needed for 75%</Text>
+                <Text style={[styles.infoTitle, { color: theme.text }]}>Classes Needed for 75%</Text>
                 <Text style={[styles.infoValue, { color: theme.warning }]}>
                   {data.analysis.classes_needed_for_75}
                 </Text>
@@ -326,7 +327,7 @@ export default function SubjectDetail() {
             {/* ── Absent streak ── */}
             {data.analysis.max_absent_streak > 0 && (
               <View style={[styles.infoCard, { backgroundColor: theme.dangerLight }]}>
-                <Text style={[styles.infoTitle, { color: theme.text }]}>📉 Longest Absent Streak</Text>
+                <Text style={[styles.infoTitle, { color: theme.text }]}>Longest Absent Streak</Text>
                 <Text style={[styles.infoValue, { color: theme.danger }]}>
                   {data.analysis.max_absent_streak} days
                 </Text>
@@ -338,7 +339,7 @@ export default function SubjectDetail() {
 
             {/* ── Total progress ── */}
             <View style={[styles.infoCard, { backgroundColor: theme.infoLight }]}>
-              <Text style={[styles.infoTitle, { color: theme.text }]}>📊 Total Progress</Text>
+              <Text style={[styles.infoTitle, { color: theme.text }]}>Total Progress</Text>
               <Text style={[styles.infoDesc, { color: theme.textSecondary, marginTop: 8 }]}>
                 Present: {present} days{"\n"}
                 Absent: {absent} days{"\n"}

@@ -208,18 +208,22 @@ def create_admin_by_super(
 
     # Send credentials email (no-op if SMTP not configured)
     from . import email_utils
-    email_sent = email_utils.send_credentials_email(admin.email, admin.name, "Branch Admin", default_pwd)
+    email_sent = email_utils.send_credentials_email(admin.email, admin.name, "Branch HOD", default_pwd)
 
     return {
         "id": admin.id,
         "email": admin.email,
         "name": admin.name,
         "branch_code": branch.code if branch else "",
-        "default_password": default_pwd,
+        # Hide password from the super-admin screen when it was emailed.
+        # If SMTP is unset we expose it so credentials don't get lost.
+        "default_password": "" if email_sent else default_pwd,
+        "email_sent": email_sent,
         "message": (
-            f"Admin created. Default password: {default_pwd}\n"
-            + ("Credentials emailed successfully." if email_sent
-               else "Configure SMTP env vars to auto-email credentials.")
+            f"HOD created. Credentials emailed to {admin.email}."
+            if email_sent
+            else f"HOD created. Default password: {default_pwd}\n"
+                 f"⚠ SMTP is not configured — share this password manually with the HOD."
         ),
     }
 
@@ -359,6 +363,7 @@ def create_teacher(
             "email": existing.email,
             "name": existing.name,
             "default_password": "",
+            "email_sent": False,
             "message": (
                 f"{existing.name} was already registered in another branch. "
                 f"Linked to your branch — no new email/credentials sent. "
@@ -398,11 +403,15 @@ def create_teacher(
         "id": teacher.id,
         "email": teacher.email,
         "name": teacher.name,
-        "default_password": default_pwd,
+        # Don't echo the password back when it was emailed — keeps it
+        # off the HOD's screen / screenshots / clipboard.
+        "default_password": "" if email_sent else default_pwd,
+        "email_sent": email_sent,
         "message": (
-            f"Teacher created. Default password: {default_pwd}\n"
-            + ("Credentials emailed successfully." if email_sent
-               else "Configure SMTP in backend env to auto-email. For now, share manually.")
+            f"Teacher created. Credentials emailed to {teacher.email}."
+            if email_sent
+            else f"Teacher created. Default password: {default_pwd}\n"
+                 f"⚠ SMTP is not configured — share this password manually."
         ),
     }
 
@@ -1508,26 +1517,65 @@ def export_attendance_pdf(
 # ============ STUDENT ============
 @app.get("/api/student/attendance")
 def my_attendance(current=Depends(auth.require_role("student")), db: Session = Depends(get_db)):
+    """Student dashboard. Optimised to ~5 DB queries flat — was doing 4 queries
+    per enrolled subject (10+ subjects → 40+ round-trips, painfully slow on
+    Render cold starts)."""
     student = current["user"]
     batch = db.query(models.Batch).filter(models.Batch.id == student.batch_id).first()
     branch = db.query(models.Branch).filter(models.Branch.id == student.branch_id).first()
-    enrollments = db.query(models.Enrollment).filter(models.Enrollment.student_id == student.id).all()
+
+    # 1. Fetch enrollments + subjects in one JOIN
+    subjects = db.query(models.Subject).join(
+        models.Enrollment, models.Enrollment.subject_id == models.Subject.id
+    ).filter(models.Enrollment.student_id == student.id).all()
+    if not subjects:
+        return {
+            "student": {
+                "reg_no": student.reg_no, "name": student.name,
+                "semester": student.current_semester,
+                "student_type": student.student_type,
+                "is_verified": student.is_verified,
+                "batch": batch.name if batch else None,
+                "branch": branch.name if branch else None,
+                "branch_code": branch.code if branch else None,
+            },
+            "subjects": [],
+        }
+
+    subject_ids = [s.id for s in subjects]
+
+    # 2. All teacher names for the subjects (one query)
+    teacher_ids = {s.teacher_id for s in subjects if s.teacher_id}
+    teacher_map = {
+        t.id: t.name for t in
+        db.query(models.Teacher).filter(models.Teacher.id.in_(teacher_ids)).all()
+    } if teacher_ids else {}
+
+    # 3. Total class days per subject — one GROUP BY query
+    total_rows = db.query(
+        models.AttendanceRecord.subject_id,
+        func.count(func.distinct(models.AttendanceRecord.class_date)),
+    ).filter(
+        models.AttendanceRecord.subject_id.in_(subject_ids)
+    ).group_by(models.AttendanceRecord.subject_id).all()
+    total_map = {sid: count for sid, count in total_rows}
+
+    # 4. Present count per subject for THIS student — one GROUP BY query
+    present_rows = db.query(
+        models.AttendanceRecord.subject_id,
+        func.count(models.AttendanceRecord.id),
+    ).filter(
+        models.AttendanceRecord.subject_id.in_(subject_ids),
+        models.AttendanceRecord.student_id == student.id,
+        models.AttendanceRecord.status == "P",
+    ).group_by(models.AttendanceRecord.subject_id).all()
+    present_map = {sid: count for sid, count in present_rows}
+
     result = []
-    for e in enrollments:
-        subj = db.query(models.Subject).filter(models.Subject.id == e.subject_id).first()
-        if not subj:
-            continue
-        actual_classes = db.query(func.count(func.distinct(models.AttendanceRecord.class_date))).filter(
-            models.AttendanceRecord.subject_id == subj.id
-        ).scalar() or 0
-        present = db.query(models.AttendanceRecord).filter(
-            models.AttendanceRecord.subject_id == subj.id,
-            models.AttendanceRecord.student_id == student.id,
-            models.AttendanceRecord.status == "P"
-        ).count()
-        teacher = db.query(models.Teacher).filter(models.Teacher.id == subj.teacher_id).first()
+    for subj in subjects:
+        actual_classes = total_map.get(subj.id, 0)
+        present = present_map.get(subj.id, 0)
         pct = (present / actual_classes * 100) if actual_classes else 0
-        # Calculate classes needed to reach 75% attendance
         classes_needed = max(0, int((0.75 * actual_classes - present) / 0.25)) if actual_classes else 0
         result.append({
             "subject_id": subj.id,
@@ -1535,7 +1583,7 @@ def my_attendance(current=Depends(auth.require_role("student")), db: Session = D
             "subject_code": subj.code,
             "semester": subj.semester,
             "credits": subj.credits,
-            "teacher_name": teacher.name if teacher else None,
+            "teacher_name": teacher_map.get(subj.teacher_id),
             "total_classes": actual_classes,
             "present": present,
             "absent": actual_classes - present,
@@ -1617,7 +1665,9 @@ def my_subject_detail(
         "analysis": {
             "max_absent_streak": max_absent_streak,
             "classes_needed_for_75": max(0, int((0.75 * total - present) / 0.25)) if total else 0,
-            "status": "Safe" if pct >= 75 else ("Warning" if pct >= 50 else "Critical"),
+            # Buckets must match Excel/PDF + teacher dashboard:
+            #   Safe ≥ 75   |   Warning 60-<75   |   Critical < 60
+            "status": "Safe" if pct >= 75 else ("Warning" if pct >= 60 else "Critical"),
         },
         "present_dates": present_dates,
         "absent_dates": absent_dates,
@@ -1796,7 +1846,12 @@ def teacher_dashboard(
     current=Depends(auth.require_role("teacher")),
     db: Session = Depends(get_db)
 ):
-    """Teacher dashboard: per-student attendance % + recent classes + stats."""
+    """Teacher dashboard: per-student attendance % + recent classes + stats.
+
+    Optimised to 4 DB queries flat (subject + dates + enrollments+students JOIN +
+    all attendance records aggregated in Python). Previous version did one query
+    per enrolled student → 50+ round-trips per dashboard load on Render free tier
+    + Supabase pooler, which made the page take 10-15s on warm hits."""
     teacher = current["user"]
     subject = db.query(models.Subject).filter(
         models.Subject.id == subject_id,
@@ -1805,25 +1860,36 @@ def teacher_dashboard(
     if not subject:
         raise HTTPException(404, "Subject not found")
 
-    # Distinct class dates
+    # 1. All distinct class dates for this subject
     all_dates = db.query(models.AttendanceRecord.class_date).filter(
         models.AttendanceRecord.subject_id == subject_id
     ).distinct().order_by(models.AttendanceRecord.class_date.desc()).all()
     class_dates = [str(d[0]) for d in all_dates]
     total_classes = len(class_dates)
 
-    # Enrolled students with per-student stats
-    enrolled = db.query(models.Enrollment).filter(models.Enrollment.subject_id == subject_id).all()
+    # 2. Enrolled students — single JOIN, no N+1
+    enrolled_students = db.query(models.Student).join(
+        models.Enrollment, models.Enrollment.student_id == models.Student.id
+    ).filter(models.Enrollment.subject_id == subject_id).all()
+
+    # 3. ALL attendance records for this subject in one shot, aggregated in Python
+    records = db.query(
+        models.AttendanceRecord.student_id,
+        models.AttendanceRecord.status,
+    ).filter(models.AttendanceRecord.subject_id == subject_id).all()
+
+    # student_id → {present, total}
+    counts = {}
+    for sid, status in records:
+        c = counts.setdefault(sid, {"present": 0, "total": 0})
+        c["total"] += 1
+        if status == "P":
+            c["present"] += 1
+
     students_stats = []
-    for e in enrolled:
-        s = db.query(models.Student).filter(models.Student.id == e.student_id).first()
-        if not s: continue
-        records = db.query(models.AttendanceRecord).filter(
-            models.AttendanceRecord.subject_id == subject_id,
-            models.AttendanceRecord.student_id == s.id
-        ).all()
-        present = sum(1 for r in records if r.status == 'P')
-        total = len(records)
+    for s in enrolled_students:
+        c = counts.get(s.id, {"present": 0, "total": 0})
+        present, total = c["present"], c["total"]
         pct = (present / total * 100) if total else 0
         students_stats.append({
             "student_id": s.id,
